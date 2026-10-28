@@ -34,37 +34,101 @@ export function builtinAssets(): Asset[] {
 
 const MAX_CACHED_IMAGE_PIXELS = 16_000_000;
 const imageCache = new Map<string, HTMLImageElement>();
+const MAX_CACHED_IMAGES = 64;
+const loadCallbacks = new Map<string, Set<() => void>>();
+const errorCallbacks = new Map<string, Set<(error: Error) => void>>();
+
 
 function pruneImageCache() {
   let pixels = 0;
   for (const image of imageCache.values()) if (image.complete && image.naturalWidth) pixels += image.naturalWidth * image.naturalHeight;
-  while (pixels > MAX_CACHED_IMAGE_PIXELS) {
-    let removed = false;
-    for (const [src, image] of imageCache) {
-      if (!image.complete || !image.naturalWidth) continue;
-      pixels -= image.naturalWidth * image.naturalHeight;
-      imageCache.delete(src);
-      removed = true;
-      break;
+  while (pixels > MAX_CACHED_IMAGE_PIXELS || imageCache.size > MAX_CACHED_IMAGES) {
+    let entry: [string, HTMLImageElement] | undefined;
+    for (const candidate of imageCache) {
+      if (candidate[1].complete || imageCache.size > MAX_CACHED_IMAGES) {
+        entry = candidate;
+        break;
+      }
     }
-    if (!removed) break;
+    if (!entry) break;
+    const [src, image] = entry;
+    const pixelsFreed = image.naturalWidth * image.naturalHeight;
+    if (pixelsFreed) pixels -= pixelsFreed;
+    imageCache.delete(src);
+    loadCallbacks.delete(src);
+    const callbacks = errorCallbacks.get(src);
+    errorCallbacks.delete(src);
+    if (!image.complete) {
+      image.onload = null;
+      image.onerror = null;
+      image.src = "";
+      callbacks?.forEach((callback) => callback(new Error("Image cache capacity exceeded")));
+    }
   }
 }
 
-export function loadImage(src: string, onLoad: () => void): HTMLImageElement {
+export function clearImageCache(): void {
+  for (const image of imageCache.values()) {
+    image.onload = null;
+    image.onerror = null;
+    image.src = "";
+  }
+  imageCache.clear();
+  loadCallbacks.clear();
+  errorCallbacks.clear();
+}
+
+
+export function removeImageCallbacks(src: string, onLoad: () => void, onError?: (error: Error) => void): void {
+  const loads = loadCallbacks.get(src);
+  loads?.delete(onLoad);
+  if (!loads?.size) loadCallbacks.delete(src);
+  if (onError) {
+    const errors = errorCallbacks.get(src);
+    errors?.delete(onError);
+    if (!errors?.size) errorCallbacks.delete(src);
+  }
+}
+
+export function loadImage(src: string, onLoad: () => void, onError?: (error: Error) => void): HTMLImageElement {
   const cached = imageCache.get(src);
   if (cached) {
     imageCache.delete(src);
     imageCache.set(src, cached);
+    if (!cached.complete) {
+      const loads = loadCallbacks.get(src) ?? new Set<() => void>();
+      loads.add(onLoad);
+      loadCallbacks.set(src, loads);
+      if (onError) {
+        const errors = errorCallbacks.get(src) ?? new Set<(error: Error) => void>();
+        errors.add(onError);
+        errorCallbacks.set(src, errors);
+      }
+    } else if (!cached.naturalWidth) onError?.(new Error("Image failed to load"));
     return cached;
   }
+
   const img = new Image();
-  img.onload = () => {
-    pruneImageCache();
-    onLoad();
-  };
-  img.onerror = () => imageCache.delete(src);
-  img.src = src;
+  loadCallbacks.set(src, new Set([onLoad]));
+  if (onError) errorCallbacks.set(src, new Set([onError]));
   imageCache.set(src, img);
+  img.onload = () => {
+    const callbacks = loadCallbacks.get(src);
+    loadCallbacks.delete(src);
+    errorCallbacks.delete(src);
+    pruneImageCache();
+    callbacks?.forEach((callback) => callback());
+  };
+  img.onerror = () => {
+    const error = new Error(`Unable to load image: ${src}`);
+    loadCallbacks.delete(src);
+    const callbacks = errorCallbacks.get(src);
+    errorCallbacks.delete(src);
+    callbacks?.forEach((callback) => callback(error));
+    pruneImageCache();
+  };
+  img.src = src;
+  pruneImageCache();
   return img;
 }
+

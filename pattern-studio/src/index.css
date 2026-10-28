@@ -19,12 +19,12 @@
   --color-primary-foreground: #141414;
   --color-secondary: #1c1c1c;
   --color-muted: #1c1c1c;
-  --color-muted-foreground: #8d8d8d;
+  --color-muted-foreground: #b3b3b3;
   --color-accent: #2a2a2a;
   --color-accent-foreground: #e6e6e6;
-  --color-border: #434343;
-  --color-input: #434343;
-  --color-ring: #8d8d8d;
+  --color-border: #858585;
+  --color-input: #858585;
+  --color-ring: #e5b83b;
   --color-foreground: #e6e6e6;
   --color-gold: #e5b83b;
 
@@ -67,8 +67,7 @@ body {
 .lh-label {
   font-family: var(--font-ui);
   font-size: 11px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
   color: var(--color-muted-foreground);
 }
 
@@ -84,7 +83,7 @@ select {
   border-radius: 8px;
   padding: 6px 8px;
   color: var(--color-foreground);
-  outline: none;
+  min-height: 36px;
   width: 100%;
 }
 
@@ -92,4 +91,91 @@ input[type="number"]:focus,
 input[type="text"]:focus,
 select:focus {
   border-color: var(--color-ring);
+}
+
+:where(button, a, input, select, summary, canvas):focus-visible {
+  outline: 2px solid var(--color-gold);
+  outline-offset: 3px;
+}
+
+canvas:focus-visible {
+  outline-offset: -3px;
+}
+
+button:not(:disabled), summary, a {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--color-gold);
+}
+
+input[type="range"] {
+  min-height: 32px;
+}
+
+@media (max-width: 767px) {
+  :where(button, a[download], summary, input, select) {
+    min-height: 44px;
+  }
+
+  header > input {
+    max-width: 100%;
+  }
+}
+
+.editor-workspace {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(220px, auto) 360px minmax(220px, auto);
+  overflow-y: auto;
+}
+
+.editor-library,
+.editor-properties {
+  width: auto;
+  min-width: 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.editor-canvas {
+  min-width: 0;
+  min-height: 320px;
+}
+
+@media (min-width: 768px) and (max-width: 1199px) {
+  .editor-workspace {
+    grid-template-columns: 220px minmax(0, 1fr);
+    grid-template-rows: minmax(320px, 1fr) 220px;
+    overflow: auto;
+  }
+
+  .editor-library {
+    max-height: none;
+  }
+
+  .editor-properties {
+    grid-column: 1 / -1;
+    max-height: 220px;
+  }
+}
+
+@media (min-width: 1200px) {
+  .editor-workspace {
+    grid-template-columns: 260px minmax(0, 1fr) 300px;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .editor-library,
+  .editor-properties {
+    max-height: none;
+  }
 }

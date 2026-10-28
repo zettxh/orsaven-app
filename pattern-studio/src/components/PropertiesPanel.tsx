@@ -27,7 +27,7 @@ export default function PropertiesPanel(props: Props) {
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-3">
       <div>
-        <div className="lh-label mb-2">Tile</div>
+        <h2 className="lh-label mb-2">Tile</h2>
         <div className="grid grid-cols-2 gap-2">
           <Field label="Lebar (px)">
             <input
@@ -77,8 +77,8 @@ export default function PropertiesPanel(props: Props) {
       </div>
 
       <div className="border-t border-border pt-3">
-        <div className="lh-label mb-2">Item Terpilih</div>
-        {!item && <p className="text-[12px] text-muted-foreground">Klik item di canvas atau di daftar Layers.</p>}
+        <h2 className="lh-label mb-2">Item Terpilih</h2>
+        {!item && <p className="text-[12px] text-muted-foreground">Pilih item di canvas atau tombol Layers. Gunakan Tab untuk menjangkau kontrol.</p>}
         {item && (
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-2 rounded-lg border border-border bg-card p-2">
@@ -111,6 +111,7 @@ export default function PropertiesPanel(props: Props) {
             <Field label={`Rotasi: ${Math.round(item.rotation)}°`}>
               <input
                 type="range"
+                aria-label="Rotasi"
                 min={-180}
                 max={180}
                 value={item.rotation}
@@ -120,6 +121,7 @@ export default function PropertiesPanel(props: Props) {
             <Field label={`Skala: ${Math.round(item.scale * 100)}%`}>
               <input
                 type="range"
+                aria-label="Skala"
                 min={10}
                 max={300}
                 value={Math.round(item.scale * 100)}
@@ -129,7 +131,8 @@ export default function PropertiesPanel(props: Props) {
             <Field label={`Opacity: ${Math.round(item.opacity * 100)}%`}>
               <input
                 type="range"
-                min={10}
+                aria-label="Opacity"
+                min={0}
                 max={100}
                 value={Math.round(item.opacity * 100)}
                 onChange={(e) => props.onPatchItem({ opacity: Number(e.target.value) / 100 })}
@@ -139,12 +142,14 @@ export default function PropertiesPanel(props: Props) {
             <div className="grid grid-cols-2 gap-2">
               <button
                 className={`rounded-lg border px-2 py-2 ${item.flipX ? "border-ring bg-accent" : "border-border bg-card"}`}
+                aria-pressed={item.flipX}
                 onClick={() => props.onPatchItem({ flipX: !item.flipX })}
               >
                 Flip Horizontal
               </button>
               <button
                 className={`rounded-lg border px-2 py-2 ${item.flipY ? "border-ring bg-accent" : "border-border bg-card"}`}
+                aria-pressed={item.flipY}
                 onClick={() => props.onPatchItem({ flipY: !item.flipY })}
               >
                 Flip Vertikal
@@ -161,7 +166,7 @@ export default function PropertiesPanel(props: Props) {
               <button className="rounded-lg border border-border bg-card px-2 py-2" onClick={props.onDuplicate}>
                 Duplikat
               </button>
-              <button className="rounded-lg border border-red-900 bg-[#2a1a1a] px-2 py-2" onClick={props.onDelete}>
+              <button className="rounded-lg border border-border bg-[#2a1a1a] px-2 py-2" onClick={props.onDelete}>
                 Hapus item
               </button>
             </div>

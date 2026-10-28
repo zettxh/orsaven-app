@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Editor manual: pemeriksaan alur pengguna</title>
+  <style>body{margin:1rem;font:16px system-ui;color:#202020}button{min-height:44px}iframe{width:100%;height:850px;border:1px solid #777}pre{white-space:pre-wrap}</style>
+</head>
+<body>
+  <h1>Editor manual</h1>
+  <button id="run">Periksa editor</button>
+  <pre id="result" role="status">Belum dijalankan</pre>
+  <iframe src="/" title="Editor Orsaven"></iframe>
+  <script type="module">
+    const result = document.querySelector('#result');
+    const pause = () => new Promise(resolve => setTimeout(resolve, 40));
+    async function until(predicate, message) {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) { if (predicate()) return; await pause(); }
+      throw new Error(message);
+    }
+    function button(doc, label) {
+      const control = [...doc.querySelectorAll('button')].find(entry => entry.getAttribute('aria-label') === label || entry.textContent.trim() === label);
+      if (!control) throw new Error(`Kontrol tidak ditemukan: ${label}`);
+      return control;
+    }
+    function changeValue(input, value) {
+      const view = input.ownerDocument.defaultView;
+      const prototype = input.tagName === 'SELECT' ? view.HTMLSelectElement.prototype : view.HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, String(value));
+      input.dispatchEvent(new view.Event('input', { bubbles: true }));
+      input.dispatchEvent(new view.Event('change', { bubbles: true }));
+    }
+    function layer(doc, number) {
+      return [...doc.querySelectorAll('button')].find(entry => entry.textContent.trim().startsWith(`Layer ${number} ·`));
+    }
+    function key(doc, target, value, modifiers = {}) {
+      target.dispatchEvent(new doc.defaultView.KeyboardEvent('keydown', { key: value, bubbles: true, ...modifiers }));
+    }
+    function chooseFile(doc, file, extension) {
+      const input = [...doc.querySelectorAll('input[type="file"]')].find(entry => entry.accept.includes(extension));
+      const transfer = new doc.defaultView.DataTransfer();
+      transfer.items.add(file);
+      Object.defineProperty(input, 'files', { configurable: true, value: transfer.files });
+      input.dispatchEvent(new doc.defaultView.Event('change', { bubbles: true }));
+    }
+    async function savedProject(doc) {
+      const previous = [...doc.querySelectorAll('a[download]')].find(entry => entry.download.endsWith('.json'))?.href;
+      button(doc, 'Save project JSON').click();
+      await until(() => [...doc.querySelectorAll('a[download]')].some(entry => entry.download.endsWith('.json') && entry.href !== previous), 'Project tidak tersedia');
+      const link = [...doc.querySelectorAll('a[download]')].find(entry => entry.download.endsWith('.json'));
+      return (await fetch(link.href)).json();
+    }
+    document.querySelector('#run').onclick = async () => {
+      result.textContent = 'RUNNING';
+      let restoreConfirm;
+      try {
+        const frame = document.querySelector('iframe');
+        await until(() => frame.contentDocument?.querySelector('canvas'), 'Editor belum siap');
+        const doc = frame.contentDocument;
+        const originalConfirm = doc.defaultView.confirm;
+        doc.defaultView.confirm = () => true;
+        restoreConfirm = () => { doc.defaultView.confirm = originalConfirm; };
+        button(doc, 'Project baru').click();
+        await until(() => doc.querySelector('footer')?.textContent.includes('0 item'), 'Project baru tidak kosong');
+        const project = await savedProject(doc);
+        if (project.items.length !== 0 || project.assets.length !== 5 || project.tile.width !== 512 || project.name !== 'Pattern tanpa judul') throw new Error('Project baru kehilangan library awal atau tile default');
+        if (!button(doc, 'Undo').disabled || !button(doc, 'Redo').disabled) throw new Error('Project baru masih mempunyai history');
+        button(doc, 'Tambah Bintang ke tile').click();
+        await until(() => layer(doc, 1), 'Aset tidak ditempatkan');
+        button(doc, 'Duplikat').click();
+        await until(() => layer(doc, 2), 'Duplikat tidak dibuat');
+        const shared = await savedProject(doc);
+        if (shared.assets.length !== 5 || shared.items.length !== 2 || shared.items[0].assetId !== shared.items[1].assetId) throw new Error('Duplikat tidak berbagi sumber aset');
+        changeValue(doc.querySelector('[aria-label="Opacity"]'), 40);
+        await until(() => doc.querySelector('[aria-label="Opacity"]').value === '40', 'Opacity tidak berubah');
+        let state = await savedProject(doc);
+        if (state.items[0].opacity !== 1 || state.items[1].opacity !== 0.4) throw new Error('Edit satu penempatan memengaruhi sumber atau penempatan lain');
+        button(doc, 'Undo').click();
+        await pause();
+        state = await savedProject(doc);
+        if (state.items.length !== 2 || state.items[1].opacity !== 1) throw new Error('Undo tidak memulihkan edit opacity');
+        button(doc, 'Redo').click();
+        await pause();
+        state = await savedProject(doc);
+        if (state.items[1].opacity !== 0.4) throw new Error('Redo tidak memulihkan edit');
+        button(doc, 'Hapus item').click();
+        await until(() => !layer(doc, 2), 'Item tidak terhapus');
+        state = await savedProject(doc);
+        if (state.assets.length !== 5 || state.items.length !== 1) throw new Error('Menghapus item ikut menghapus aset');
+        key(doc, doc.querySelector('canvas'), 'z', { ctrlKey: true });
+        await until(() => layer(doc, 2), 'Keyboard undo tidak memulihkan item');
+        layer(doc, 2).click();
+        await pause();
+        button(doc, 'Flip Horizontal').click();
+        changeValue(doc.querySelector('[aria-label="Rotasi"]'), 37);
+        await pause();
+        changeValue(doc.querySelector('[aria-label="Skala"]'), 130);
+        await pause();
+        const beforeLayer = await savedProject(doc);
+        const edited = beforeLayer.items[1];
+        if (!edited.flipX || edited.rotation !== 37 || edited.scale !== 1.3) throw new Error('Transformasi item tidak tersimpan');
+        button(doc, 'Layer ke bawah').click();
+        await pause();
+        const beforeView = await savedProject(doc);
+        if (beforeView.items[0].id !== edited.id) throw new Error('Urutan layer tidak berubah');
+        changeValue(doc.querySelector('[aria-label="Preview"]'), 'repeat3');
+        const zoom = [...doc.querySelectorAll('label')].find(entry => entry.textContent.trim().startsWith('Zoom')).querySelector('input');
+        changeValue(zoom, 80);
+        const canvas = doc.querySelector('canvas');
+        canvas.focus();
+        key(doc, canvas, 'ArrowDown', { altKey: true });
+        button(doc, 'Buang cache preview').click();
+        await pause();
+        if (JSON.stringify(await savedProject(doc)) !== JSON.stringify(beforeView)) throw new Error('Pan, zoom, repeat atau cache mengubah project');
+        button(doc, 'Undo').click();
+        await pause();
+        const afterViewUndo = await savedProject(doc);
+        if (afterViewUndo.items[1].id !== edited.id) throw new Error('Tampilan atau cache masuk history');
+        const oldName = afterViewUndo.name;
+        const name = doc.querySelector('[aria-label="Nama pattern"]');
+        name.focus();
+        key(doc, name, 'Delete');
+        await pause();
+        if ((await savedProject(doc)).items.length !== 2 || name.value !== oldName) throw new Error('Shortcut object mengganggu input teks');
+        changeValue(doc.querySelector('[aria-label="Cari aset"]'), 'tidak-ada-aset');
+        await until(() => !doc.querySelector('button[title^="Tambah"]'), 'Pencarian kosong tidak ditampilkan');
+        if (!doc.body.textContent.includes('Tidak ada aset yang cocok')) throw new Error('Pencarian kosong tidak memberi arahan');
+        changeValue(doc.querySelector('[aria-label="Cari aset"]'), '');
+        const source = await (await fetch('/tests/fixtures/svg-proof-asymmetric.svg')).text();
+        const file = new doc.defaultView.File([source], 'editor-shared.svg', { type: 'image/svg+xml' });
+        let resumeRead;
+        const pendingRead = new Promise(resolve => { resumeRead = resolve; });
+        Object.defineProperty(file, 'text', { value: () => pendingRead });
+        chooseFile(doc, file, '.svg');
+        await until(() => doc.querySelector('[aria-busy="true"]'), 'Library tidak menampilkan loading saat pembacaan file tertunda');
+        if (!button(doc, 'Import SVG asset').disabled) throw new Error('Import ganda masih aktif saat loading');
+        button(doc, 'Duplikat').click();
+        await until(() => layer(doc, 3), 'Editor tidak dapat dipakai saat pembacaan file');
+        resumeRead(source);
+        await until(() => !doc.querySelector('[aria-busy="true"]') && layer(doc, 4), 'Import tidak selesai atau menimpa edit selama loading');
+        const imported = await savedProject(doc);
+        if (imported.assets.length !== 6 || imported.items.length !== 4 || imported.assets.find(asset => asset.name === 'editor-shared.svg')?.originalSvg !== source) throw new Error('Import kehilangan sumber asli atau edit yang berlangsung bersamaan');
+        button(doc, 'Undo').click();
+        await until(() => !layer(doc, 4), 'Import bukan satu edit atomic');
+        const undoneImport = await savedProject(doc);
+        if (undoneImport.assets.length !== 5 || undoneImport.items.length !== 3) throw new Error('Undo import ikut menghapus edit lain');
+        const unsafe = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>alert(1)</scr' + 'ipt></svg>';
+        chooseFile(doc, new doc.defaultView.File([unsafe], 'unsafe-editor.svg', { type: 'image/svg+xml' }), '.svg');
+        await pause();
+        await until(() => !doc.querySelector('[aria-busy="true"]') && doc.querySelector('[role="alert"]'), 'Library tidak menampilkan error');
+        if (JSON.stringify(await savedProject(doc)) !== JSON.stringify(undoneImport)) throw new Error('Import gagal mengubah dokumen kerja');
+        chooseFile(doc, new doc.defaultView.File(['{invalid'], 'broken.json', { type: 'application/json' }), '.json');
+        await pause();
+        await until(() => !doc.querySelector('[aria-busy="true"]') && doc.querySelector('[role="alert"]'), 'Project rusak tidak ditolak');
+        if (JSON.stringify(await savedProject(doc)) !== JSON.stringify(undoneImport)) throw new Error('Project rusak merusak dokumen kerja');
+        const empty = { name: 'Library kosong', tile: project.tile, items: [], assets: [] };
+        chooseFile(doc, new doc.defaultView.File([JSON.stringify(empty)], 'empty.json', { type: 'application/json' }), '.json');
+        await until(() => doc.querySelector('[aria-label="Nama pattern"]').value === empty.name && !doc.querySelector('[aria-busy="true"]'), 'Project library kosong tidak terbuka');
+        if (doc.querySelector('button[title^="Tambah"]') || !button(doc, 'Undo').disabled) throw new Error('Project kosong masih menyimpan aset atau history project lama');
+        const emptyState = await savedProject(doc);
+        if (emptyState.items.length !== 0 || emptyState.assets.length !== 0) throw new Error('Library kosong tidak sesuai file project');
+        result.textContent = 'PASS: project baru; aset bersama; transformasi; delete menjaga aset; undo/redo; layer; keyboard; pan/zoom/cache di luar history; empty/loading/error; import atomic tanpa kehilangan edit; sumber SVG asli; project rusak menjaga dokumen';
+      } catch (error) { result.textContent = `FAIL: ${error.message}`; }
+      finally { restoreConfirm?.(); }
+    };
+  </script>
+</body>
+</html>

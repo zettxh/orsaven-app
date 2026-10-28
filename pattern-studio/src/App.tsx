@@ -40,14 +40,17 @@ async function fabricSvgSource(source: string, parsed: Awaited<ReturnType<typeof
   return new XMLSerializer().serializeToString(document.documentElement);
 }
 export default function App() {
-  const [projectName, setProjectName] = useState("Pattern tanpa judul");
-  const [assets, setAssets] = useState<Asset[]>(() => builtinAssets());
-  const [items, setItems] = useState<PatternItem[]>(() => [
-    { id: uid(), assetId: "builtin-star", x: 128, y: 128, size: 140, rotation: 0, scale: 1, opacity: 1, flipX: false, flipY: false },
-    { id: uid(), assetId: "builtin-leaf", x: 384, y: 384, size: 150, rotation: 25, scale: 1, opacity: 1, flipX: false, flipY: false },
-    { id: uid(), assetId: "builtin-ring", x: 384, y: 128, size: 100, rotation: 0, scale: 1, opacity: 0.9, flipX: false, flipY: false },
-  ]);
-  const [tile, setTile] = useState<TileSettings>(DEFAULT_TILE);
+  const [project, setProject] = useState<Project>(() => ({
+    name: "Pattern tanpa judul",
+    tile: DEFAULT_TILE,
+    items: [
+      { id: uid(), assetId: "builtin-star", x: 128, y: 128, size: 140, rotation: 0, scale: 1, opacity: 1, flipX: false, flipY: false },
+      { id: uid(), assetId: "builtin-leaf", x: 384, y: 384, size: 150, rotation: 25, scale: 1, opacity: 1, flipX: false, flipY: false },
+      { id: uid(), assetId: "builtin-ring", x: 384, y: 128, size: 100, rotation: 0, scale: 1, opacity: 0.9, flipX: false, flipY: false },
+    ],
+    assets: builtinAssets(),
+  }));
+  const { name: projectName, assets, items, tile } = project;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [preview, setPreview] = useState<PreviewMode>("fill");
@@ -58,131 +61,220 @@ export default function App() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(false);
   const [exportError, setExportError] = useState(false);
-  const importRef = useRef<HTMLInputElement>(null);
   const loadRef = useRef<HTMLInputElement>(null);
-  const importingRef = useRef(false);
   const [exporting, setExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState("");
   const [artifacts, setArtifacts] = useState<{ format: string; name: string; url: string }[]>([]);
   const artifactUrls = useRef(new Map<string, string>());
   const documentRevision = useRef(0);
-  useEffect(() => {
+  const generation = useRef(0);
+  const history = useRef<{ past: Project[]; future: Project[] }>({ past: [], future: [] });
+  const current = useRef(project);
+  current.current = project;
+  const canUndo = history.current.past.length > 0;
+  const canRedo = history.current.future.length > 0;
+
+  function invalidateArtifacts() {
     documentRevision.current += 1;
+    const hasArtifacts = artifacts.length > 0 || artifactUrls.current.size > 0;
     for (const url of artifactUrls.current.values()) URL.revokeObjectURL(url);
-    if (artifacts.length) setArtifacts([]);
+    artifactUrls.current.clear();
+    if (hasArtifacts) setArtifacts([]);
     if (exportMessage) setExportMessage("");
     if (exportError) setExportError(false);
-  }, [assets, items, tile, projectName]);
+  }
+
+  function commit(next: Project) {
+    const previous = current.current;
+    const sameTile = Object.keys(previous.tile).every((key) => previous.tile[key as keyof TileSettings] === next.tile[key as keyof TileSettings]);
+    const sameItems = previous.items.length === next.items.length && previous.items.every((item, index) => {
+      const other = next.items[index];
+      return item.id === other.id && item.assetId === other.assetId && item.x === other.x && item.y === other.y &&
+        item.size === other.size && item.rotation === other.rotation && item.scale === other.scale &&
+        item.opacity === other.opacity && item.flipX === other.flipX && item.flipY === other.flipY;
+    });
+    const sameAssets = previous.assets.length === next.assets.length && previous.assets.every((asset, index) => asset === next.assets[index]);
+    if (next.name === previous.name && sameTile && sameItems && sameAssets) return;
+    invalidateArtifacts();
+    history.current.past = [...history.current.past.slice(-49), previous];
+    history.current.future = [];
+    current.current = next;
+    setProject(next);
+  }
+  function resetEditorView() {
+    setSelectedId(null);
+    setSearch("");
+    setPreview("fill");
+    setZoom(0.6);
+    setPan({ x: 0, y: 0 });
+    setShowOutline(true);
+    setImportMessage("");
+    setImporting(false);
+    setImportError(false);
+    setExporting(false);
+    history.current = { past: [], future: [] };
+  }
+  function applyProject(project: Project) {
+    generation.current += 1;
+    invalidateArtifacts();
+    current.current = project;
+    setProject(project);
+    resetEditorView();
+  }
+
+  function undo() {
+    const previous = history.current.past[history.current.past.length - 1];
+    if (!previous) return;
+    invalidateArtifacts();
+    history.current = { past: history.current.past.slice(0, -1), future: [current.current, ...history.current.future].slice(0, 50) };
+    current.current = previous;
+    setProject(previous);
+    setSelectedId((id) => previous.items.some((item) => item.id === id) ? id : null);
+  }
+
+  function redo() {
+    const next = history.current.future[0];
+    if (!next) return;
+    invalidateArtifacts();
+    history.current = { past: [...history.current.past.slice(-49), current.current], future: history.current.future.slice(1) };
+    current.current = next;
+    setProject(next);
+    setSelectedId((id) => next.items.some((item) => item.id === id) ? id : null);
+  }
+
+  function newProject() {
+    if (history.current.past.length && !window.confirm("Buang perubahan project dan buat project baru?")) return;
+    applyProject({ name: "Pattern tanpa judul", tile: DEFAULT_TILE, items: [], assets: builtinAssets() });
+  }
+
   useEffect(() => () => {
+    generation.current += 1;
     for (const url of artifactUrls.current.values()) URL.revokeObjectURL(url);
     artifactUrls.current.clear();
   }, []);
 
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.isComposing || event.metaKey && event.key === "Process") return;
+      const target = event.target;
+      const editable = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target instanceof HTMLInputElement && ["text", "search", "number", "range"].includes(target.type));
+      if (editable) return;
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        event.shiftKey ? redo() : undo();
+      } else if (mod && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redo();
+      } else if (mod && event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        duplicateSelected();
+      } else if ((event.key === "Delete" || event.key === "Backspace") && selectedId) {
+        event.preventDefault();
+        deleteSelected();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
   const selected = useMemo(() => items.find((i) => i.id === selectedId) ?? null, [items, selectedId]);
 
-  function addAsset(assetId: string) {
+  function addAsset(assetId: string, asset?: Asset) {
     const item: PatternItem = {
-      id: uid(),
-      assetId,
-      x: tile.width / 2,
-      y: tile.height / 2,
-      size: Math.round(tile.width / 4),
-      rotation: 0,
-      scale: 1,
-      opacity: 1,
-      flipX: false,
-      flipY: false,
+      id: uid(), assetId, x: tile.width / 2, y: tile.height / 2, size: Math.round(tile.width / 4),
+      rotation: 0, scale: 1, opacity: 1, flipX: false, flipY: false,
     };
-    setItems((prev) => [...prev, item]);
+    commit({ ...current.current, assets: asset ? [...current.current.assets, asset] : current.current.assets, items: [...current.current.items, item] });
     setSelectedId(item.id);
   }
 
   async function importFiles(files: FileList | null) {
     if (!files?.length) return;
-    if (importingRef.current) {
-      setImportMessage("An import is already running");
-      setImportError(true);
-      return;
-    }
-    importingRef.current = true;
+    const request = ++generation.current;
     setImporting(true);
     setImportMessage("");
     setImportError(false);
-    const pendingAssets = [...assets];
     try {
+      const imported: Asset[] = [];
       for (const file of Array.from(files)) {
-        try {
-          if (file.size > 16_000_000) throw new Error("File exceeds 16 MB import limit");
-          if (file.type !== "image/svg+xml" && !file.name.toLowerCase().endsWith(".svg")) throw new Error("Ticket 01 proof accepts SVG files only");
-          if (file.size > 256_000) throw new Error("SVG exceeds 256 KB import limit");
-          const originalSvg = await file.text();
-          const safeSvg = validateSvg(originalSvg);
-          const asset: Asset = { id: uid(), name: file.name, src: svgDataUrl(safeSvg), originalSvg };
-          assertAssetPixelBudget([...pendingAssets, asset]);
-          const parsed = await loadSVGFromString(safeSvg);
-          if (!parsed.objects.some(Boolean)) throw new Error("Fabric could not parse SVG artwork");
-          const fabricSvg = await fabricSvgSource(safeSvg, parsed);
-          const fabricAsset = { ...asset, src: svgDataUrl(fabricSvg), fabricSvg };
-          pendingAssets.push(fabricAsset);
-          setAssets((prev) => [...prev, fabricAsset]);
-          addAsset(fabricAsset.id);
-          setImportMessage(`${file.name}: imported`);
-          setImportError(false);
-        } catch (error) {
-          setImportMessage(`${file.name}: ${error instanceof Error ? error.message : "Import failed"}`);
-          setImportError(true);
-        }
+        if (file.size > 16_000_000) throw new Error("File exceeds 16 MB import limit");
+        if (file.type !== "image/svg+xml" && !file.name.toLowerCase().endsWith(".svg")) throw new Error("SVG files only");
+        if (file.size > 256_000) throw new Error("SVG exceeds 256 KB import limit");
+        const originalSvg = await file.text();
+        const safeSvg = validateSvg(originalSvg);
+        const asset: Asset = { id: uid(), name: file.name, src: svgDataUrl(safeSvg), originalSvg };
+        assertAssetPixelBudget([...current.current.assets, ...imported, asset]);
+        const parsed = await loadSVGFromString(safeSvg);
+        if (!parsed.objects.some(Boolean)) throw new Error("Fabric could not parse SVG artwork");
+        const fabricSvg = await fabricSvgSource(safeSvg, parsed);
+        imported.push({ ...asset, src: svgDataUrl(fabricSvg), fabricSvg });
       }
+      if (request !== generation.current) return;
+      const nextItems = [...current.current.items];
+      const addedItems = imported.map((asset) => ({
+        id: uid(), assetId: asset.id, x: current.current.tile.width / 2, y: current.current.tile.height / 2,
+        size: Math.round(current.current.tile.width / 4), rotation: 0, scale: 1, opacity: 1, flipX: false, flipY: false,
+      }));
+      commit({ ...current.current, assets: [...current.current.assets, ...imported], items: [...nextItems, ...addedItems] });
+      setSelectedId(addedItems[addedItems.length - 1]?.id ?? selectedId);
+      setImportMessage(`${imported.length} SVG imported`);
+      setImportError(false);
+    } catch (error) {
+      if (request !== generation.current) return;
+      setImportMessage(error instanceof Error ? error.message : "Import failed");
+      setImportError(true);
     } finally {
-      importingRef.current = false;
-      setImporting(false);
+      if (request === generation.current) setImporting(false);
     }
   }
 
   function patchItem(patch: Partial<PatternItem>) {
     if (!selectedId) return;
-    setItems((prev) => prev.map((i) => (i.id === selectedId ? { ...i, ...patch } : i)));
+    const nextItems = current.current.items.map((item) => item.id === selectedId ? { ...item, ...patch } : item);
+    commit({ ...current.current, items: nextItems });
   }
 
   function patchTile(patch: Partial<TileSettings>) {
-    const next = { ...tile, ...patch };
+    const next = { ...current.current.tile, ...patch };
     if (!Number.isInteger(next.width) || !Number.isInteger(next.height) || next.width < 64 || next.height < 64 || next.width > 4_096 || next.height > 4_096 || next.width * next.height > 8_000_000) {
       setImportMessage("Tile edit rejected: use integer dimensions from 64 to 4096 px and stay below 8 megapixels");
       setImportError(true);
       return;
     }
-    setTile(next);
     setImportMessage("");
     setImportError(false);
+    commit({ ...current.current, tile: next });
   }
+
   function moveItem(id: string, x: number, y: number) {
-    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, x: wrap(x, tile.width), y: wrap(y, tile.height) } : i)));
+    const nextItems = current.current.items.map((item) => item.id === id ? { ...item, x: wrap(x, current.current.tile.width), y: wrap(y, current.current.tile.height) } : item);
+    commit({ ...current.current, items: nextItems });
   }
 
   function moveLayer(dir: 1 | -1) {
     if (!selectedId) return;
-    setItems((prev) => {
-      const idx = prev.findIndex((i) => i.id === selectedId);
-      if (idx < 0) return prev;
-      const next = [...prev];
-      const target = idx + dir;
-      if (target < 0 || target >= next.length) return prev;
-      const [item] = next.splice(idx, 1);
-      next.splice(target, 0, item);
-      return next;
-    });
+    const items = current.current.items;
+    const index = items.findIndex((item) => item.id === selectedId);
+    if (index < 0 || index + dir < 0 || index + dir >= items.length) return;
+    const next = [...items];
+    const [item] = next.splice(index, 1);
+    next.splice(index + dir, 0, item);
+    commit({ ...current.current, items: next });
   }
 
   function duplicateSelected() {
     if (!selected) return;
     const copy: PatternItem = { ...selected, id: uid(), x: wrap(selected.x + 32, tile.width), y: wrap(selected.y + 32, tile.height) };
-    setItems((prev) => [...prev, copy]);
+    commit({ ...current.current, items: [...current.current.items, copy] });
     setSelectedId(copy.id);
   }
 
   function deleteSelected() {
     if (!selectedId) return;
-    setItems((prev) => prev.filter((i) => i.id !== selectedId));
+    const nextItems = current.current.items.filter((item) => item.id !== selectedId);
+    if (nextItems.length === current.current.items.length) return;
+    commit({ ...current.current, items: nextItems });
     setSelectedId(null);
   }
 
@@ -274,20 +366,27 @@ export default function App() {
   }
 
   function loadProjectFile(file: File) {
+    if (history.current.past.length && !window.confirm("Buang perubahan project dan buka file ini?")) return;
+    const request = ++generation.current;
     if (file.size > 16_000_000) {
+      setImporting(false);
       setImportMessage("Project exceeds 16 MB limit");
       setImportError(true);
       return;
     }
+    setImporting(true);
+    setImportMessage("");
     const reader = new FileReader();
     reader.onerror = () => {
+      if (request !== generation.current) return;
+      setImporting(false);
       setImportMessage("Project file could not be read");
       setImportError(true);
     };
     reader.onload = async () => {
       try {
         const project = JSON.parse(String(reader.result)) as Project;
-        if (!Array.isArray(project.assets) || !Array.isArray(project.items) || project.assets.length > 64 || project.items.length > 256) throw new Error("Project data exceeds proof limits");
+        if (!Array.isArray(project.assets) || !Array.isArray(project.items) || project.assets.length > 64 || project.items.length > 256) throw new Error("Project exceeds supported asset or item counts");
         const safeAssets: Asset[] = [];
         for (const asset of project.assets) {
           if (typeof asset.id !== "string" || typeof asset.name !== "string" || typeof asset.src !== "string") throw new Error("Project asset data is invalid");
@@ -308,16 +407,16 @@ export default function App() {
         if (!["grid", "brick", "half-drop", "mirror"].includes(safeTile.repeat) || !["dark", "checker", "light"].includes(safeTile.background)) throw new Error("Project tile settings are invalid");
         assertAssetPixelBudget(safeAssets);
         assertRasterBudget(safeTile, project.items, safeAssets);
-        setProjectName(typeof project.name === "string" ? project.name : "Pattern tanpa judul");
-        setTile(safeTile);
-        setItems(project.items);
-        setAssets(safeAssets);
-        setSelectedId(null);
+        if (request !== generation.current) return;
+        applyProject({ name: typeof project.name === "string" ? project.name : "Pattern tanpa judul", tile: safeTile, items: project.items, assets: safeAssets });
         setImportMessage("Project opened");
         setImportError(false);
       } catch (error) {
+        if (request !== generation.current) return;
         setImportMessage(error instanceof Error ? error.message : "Project file invalid");
         setImportError(true);
+      } finally {
+        if (request === generation.current) setImporting(false);
       }
     };
     reader.readAsText(file);
@@ -325,30 +424,20 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
-      {/* Top bar bergaya LearnHarness: judul serif, kontrol mono, aksi di kanan. */}
       <header className="flex flex-wrap items-center gap-3 border-b border-border bg-background px-4 py-3">
-        <div className="flex items-center gap-3">
-          <span className="flex gap-1.5" aria-hidden>
-            <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
-            <span className="h-3 w-3 rounded-full bg-[#febc2e]" />
-            <span className="h-3 w-3 rounded-full bg-[#28c840]" />
-          </span>
-          <h1 className="font-title text-[28px] font-bold leading-none">Pattern Studio</h1>
-        </div>
-
+        <h1 className="font-title text-[28px] font-bold leading-none">Pattern Studio</h1>
         <input
           type="text"
           value={projectName}
-          onChange={(e) => setProjectName(e.target.value)}
+          onChange={(event) => commit({ ...current.current, name: event.target.value })}
           className="!w-56"
           aria-label="Nama pattern"
         />
-
         <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
-          <span className="lh-label">Preview</span>
           <select
+            aria-label="Preview"
             value={preview}
-            onChange={(e) => setPreview(e.target.value as PreviewMode)}
+            onChange={(event) => setPreview(event.target.value as PreviewMode)}
             className="!w-auto"
           >
             <option value="tile">1 Tile</option>
@@ -356,7 +445,7 @@ export default function App() {
             <option value="fill">Fill layar</option>
           </select>
           <label className="flex items-center gap-1 text-[12px] text-muted-foreground">
-            <input type="checkbox" checked={showOutline} onChange={(e) => setShowOutline(e.target.checked)} />
+            <input type="checkbox" checked={showOutline} onChange={(event) => setShowOutline(event.target.checked)} />
             Outline tile
           </label>
           <label className="flex items-center gap-1 text-[12px] text-muted-foreground">
@@ -366,32 +455,40 @@ export default function App() {
               min={10}
               max={300}
               value={Math.round(zoom * 100)}
-              onChange={(e) => setZoom(Number(e.target.value) / 100)}
+              onChange={(event) => setZoom(Number(event.target.value) / 100)}
               className="w-24"
             />
             {Math.round(zoom * 100)}%
           </label>
         </div>
-
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          <button className="rounded-lg border border-border bg-card px-3 py-2 md:hidden" onClick={() => importRef.current?.click()} aria-label="Import SVG asset">
-            Import SVG
+          <button className="rounded-lg border border-border bg-card px-3 py-2" onClick={newProject} aria-label="Project baru">
+            Project baru
           </button>
-          <input
-            ref={importRef}
-            type="file"
-            accept=".svg,image/svg+xml"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              importFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
+          <button
+            disabled={!canUndo}
+            className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50"
+            onClick={undo}
+            aria-label="Undo"
+          >
+            Undo
+          </button>
+          <button
+            disabled={!canRedo}
+            className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50"
+            onClick={redo}
+            aria-label="Redo"
+          >
+            Redo
+          </button>
           <button className="rounded-lg border border-border bg-card px-3 py-2" onClick={saveProject} aria-label="Save project JSON">
             Simpan .json
           </button>
-          <button className="rounded-lg border border-border bg-card px-3 py-2" onClick={() => loadRef.current?.click()} aria-label="Open project JSON">
+          <button
+            className="rounded-lg border border-border bg-card px-3 py-2"
+            onClick={() => loadRef.current?.click()}
+            aria-label="Open project JSON"
+          >
             Buka .json
           </button>
           <input
@@ -399,51 +496,59 @@ export default function App() {
             type="file"
             accept=".json,application/json"
             className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) loadProjectFile(f);
-              e.target.value = "";
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) loadProjectFile(file);
+              event.target.value = "";
             }}
           />
-          <button disabled={exporting} className="rounded-lg border border-gold px-3 py-2 text-gold disabled:opacity-50" onClick={exportSvg} aria-label="Export actual vector SVG">
+          <button
+            disabled={exporting}
+            className="rounded-lg border border-gold px-3 py-2 text-gold disabled:opacity-50"
+            onClick={exportSvg}
+            aria-label="Export actual vector SVG"
+          >
             Export SVG
           </button>
-          <button disabled={exporting} className="rounded-lg bg-primary px-3 py-2 font-bold text-primary-foreground disabled:opacity-50" onClick={() => exportRaster("png", 1)} aria-label="Export PNG at 1x">
+          <button
+            disabled={exporting}
+            className="rounded-lg bg-primary px-3 py-2 font-bold text-primary-foreground disabled:opacity-50"
+            onClick={() => exportRaster("png", 1)}
+            aria-label="Export PNG at 1x"
+          >
             Export PNG 1x
           </button>
-          <button disabled={exporting} className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50" onClick={() => exportRaster("jpeg", 1)} aria-label="Export JPEG with white background">
+          <button
+            disabled={exporting}
+            className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50"
+            onClick={() => exportRaster("jpeg", 1)}
+            aria-label="Export JPEG with white background"
+          >
             Export JPG (putih)
           </button>
           {artifacts.map((artifact) => (
-            <a key={artifact.format} href={artifact.url} download={artifact.name} className="rounded border border-border px-2 py-2 text-[12px] underline">
+            <a
+              key={artifact.format}
+              href={artifact.url}
+              download={artifact.name}
+              className="rounded border border-border px-2 py-2 text-[12px] underline"
+            >
               Download {artifact.format.toUpperCase()}
             </a>
           ))}
-          {exporting || exportMessage ? <span role={exportError ? "alert" : "status"} aria-live={exportError ? "assertive" : "polite"} className="text-[12px] text-muted-foreground">{exporting ? "Preparing export…" : exportMessage}</span> : null}
-          {importing || importMessage ? <span role={importError ? "alert" : "status"} aria-live={importError ? "assertive" : "polite"} className="text-[12px] text-muted-foreground">{importing ? "Importing SVG…" : importMessage}</span> : null}
+          {exporting || exportMessage ? (
+            <span
+              role={exportError ? "alert" : "status"}
+              aria-live={exportError ? "assertive" : "polite"}
+              className="text-[12px] text-muted-foreground"
+            >
+              {exporting ? "Preparing export…" : exportMessage}
+            </span>
+          ) : null}
         </div>
       </header>
-      <details className="border-b border-border bg-background lg:hidden">
-        <summary className="cursor-pointer px-4 py-3 font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">
-          Kontrol item dan tile
-        </summary>
-        <div className="max-h-[45vh] overflow-y-auto">
-          <PropertiesPanel
-            item={selected}
-            assets={assets}
-            tile={tile}
-            onPatchItem={patchItem}
-            onPatchTile={patchTile}
-            onDuplicate={duplicateSelected}
-            onDelete={deleteSelected}
-            onMoveLayer={moveLayer}
-          />
-        </div>
-      </details>
-
-      {/* Layout tiga kolom: sidebar | canvas | properti. */}
-      <div className="flex min-h-0 flex-1">
-        <aside className="hidden w-[280px] shrink-0 border-r border-border bg-background md:block">
+      <div className="editor-workspace flex min-h-0 flex-1 flex-col md:flex-row">
+        <aside className="editor-library max-h-[30vh] w-full shrink-0 overflow-y-auto border-b border-border bg-background md:max-h-none md:w-[260px] md:border-b-0 md:border-r">
           <Sidebar
             assets={assets}
             search={search}
@@ -453,11 +558,12 @@ export default function App() {
             items={items}
             selectedId={selectedId}
             onSelectItem={setSelectedId}
+            importing={importing}
+            importMessage={importMessage}
+            importError={importError}
           />
- 
         </aside>
-
-        <main className="min-w-0 flex-1">
+        <main className="editor-canvas min-h-[280px] min-w-0 flex-1">
           <CanvasStage
             tile={tile}
             items={items}
@@ -469,14 +575,13 @@ export default function App() {
             showOutline={showOutline}
             onSelect={setSelectedId}
             onMoveItem={moveItem}
-            onViewChange={(z, p) => {
-              setZoom(z);
-              setPan(p);
+            onViewChange={(nextZoom, nextPan) => {
+              setZoom(nextZoom);
+              setPan(nextPan);
             }}
           />
         </main>
-
-        <aside className="hidden w-[300px] shrink-0 border-l border-border bg-background lg:block">
+        <aside className="editor-properties max-h-[38vh] w-full shrink-0 overflow-y-auto border-t border-border bg-background md:max-h-none md:w-[300px] md:border-l md:border-t-0">
           <PropertiesPanel
             item={selected}
             assets={assets}
@@ -489,7 +594,6 @@ export default function App() {
           />
         </aside>
       </div>
-
       <footer className="flex items-center gap-4 border-t border-border px-4 py-2 text-[11px] text-muted-foreground">
         <span>{items.length} item</span>
         <span>{assets.length} aset</span>
