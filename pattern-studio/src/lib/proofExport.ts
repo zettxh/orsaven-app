@@ -1,11 +1,12 @@
 import { copyRange, itemBounds } from "./pattern";
 import { validateSvg } from "./svg";
 import type { Asset, PatternItem, TileSettings } from "./types";
-import { util } from "fabric";
+import { Point, util } from "fabric";
 
 const MAX_COPIES = 512;
 const MAX_NODES = 40_000;
 const MAX_SOURCE_BYTES = 8_000_000;
+const PATH_ORIGIN = new Point(0, 0);
 
 const MAX_PIXELS = 8_000_000;
 interface SvgMetrics { width: number; height: number; root: string; nodes: number }
@@ -60,7 +61,7 @@ function scaledRoot(source: string, scale: number): SvgMetrics {
     const points = element.getAttribute("points");
     if (points) element.setAttribute("points", points.trim().split(/[\s,]+/).map((value) => String(Number(value) * scale)).join(" "));
     const d = element.getAttribute("d");
-    if (d) element.setAttribute("d", util.joinPath(util.transformPath(util.makePathSimpler(util.parsePath(d)), [scale, 0, 0, scale, 0, 0])));
+    if (d) element.setAttribute("d", util.joinPath(util.transformPath(util.makePathSimpler(util.parsePath(d)), [scale, 0, 0, scale, 0, 0], PATH_ORIGIN)));
     const transform = element.getAttribute("transform");
     if (transform) {
       const svgElement = element instanceof SVGGraphicsElement || element instanceof SVGClipPathElement ? element : null;
@@ -157,6 +158,7 @@ export function buildSvgArtifact(tile: TileSettings, items: PatternItem[], asset
   for (const plan of plans) {
     const { item, metrics: image, x, y } = plan;
     const width = item.size * item.scale;
+    const height = width * image.height / image.width;
     const baked = scaledRoot(image.root, width / image.width);
     for (let copyX = x.first; copyX <= x.last; copyX++) {
       for (let copyY = y.first; copyY <= y.last; copyY++) {
