@@ -62,7 +62,7 @@
     }
     async function projectArtifact(doc) {
       const previous = [...doc.querySelectorAll("a[download]")].find((link) => link.textContent.includes("PROJECT"))?.href;
-      button(doc, /Simpan \.json/).click();
+      button(doc, /Simpan \.orsaven/).click();
       await until(() => {
         const link = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes("PROJECT"));
         return link && link.href !== previous;
@@ -70,13 +70,13 @@
       const link = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes("PROJECT"));
       const response = await fetch(link.href);
       if (!response.ok) throw new Error(`Project JSON fetch failed: ${response.status}`);
-      return response.json();
+      return (await response.json()).document;
     }
     async function reopenProject(doc, project) {
       const view = doc.defaultView;
-      const input = [...doc.querySelectorAll('input[type="file"]')].find((entry) => entry.accept.includes(".json"));
-      if (!input) throw new Error("Project JSON input missing");
-      const file = new view.File([JSON.stringify(project)], "project.json", { type: "application/json" });
+      const input = [...doc.querySelectorAll('input[type="file"]')].find((entry) => entry.accept.includes(".orsaven"));
+      if (!input) throw new Error("Portable project input missing");
+      const file = new view.File([JSON.stringify({ format: "orsaven", version: 1, document: project })], "project.orsaven", { type: "application/json" });
       const transfer = new view.DataTransfer();
       transfer.items.add(file);
       Object.defineProperty(input, "files", { configurable: true, value: transfer.files });

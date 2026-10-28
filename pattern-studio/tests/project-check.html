@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Portable project codec check</title>
+</head>
+<body>
+  <button id="run" type="button">Run codec check</button>
+  <pre id="result" role="status" aria-live="polite">Not run</pre>
+  <script type="module">
+    import { decodeProject, encodeProject } from "../src/lib/project";
+
+    const result = document.querySelector("#result");
+    const rejects = (label, text) => {
+      try {
+        decodeProject(text);
+      } catch {
+        return;
+      }
+      throw new Error(`${label} was accepted`);
+    };
+    const altered = (envelope, change) => {
+      const copy = structuredClone(envelope);
+      change(copy);
+      return JSON.stringify(copy);
+    };
+    document.querySelector("#run").addEventListener("click", () => {
+      try {
+        const originalSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="#123456"/></svg>';
+        const project = {
+          name: "Codec check",
+          tile: { width: 256, height: 192, repeat: "grid", background: "checker", backgroundColor: "" },
+          items: [{ id: "item-1", assetId: "asset-1", x: 12, y: 18, size: 24, rotation: 0, scale: 1, opacity: 1, flipX: false, flipY: false }],
+          assets: [{ id: "asset-1", name: "Circle", originalSvg, src: "data:image/svg+xml,runtime-change", fabricSvg: "<svg>runtime</svg>" }],
+        };
+        const encoded = encodeProject(project);
+        const envelope = JSON.parse(encoded);
+        if (envelope.format !== "orsaven" || envelope.version !== 1) throw new Error("Missing portable project envelope");
+        if (encoded.includes('"src"') || encoded.includes('"fabricSvg"')) throw new Error("Runtime asset data was serialized");
+        const decoded = decodeProject(encoded);
+        if (decoded.assets[0].originalSvg !== originalSvg) throw new Error("Original SVG source changed");
+        if (JSON.stringify(decoded.items) !== JSON.stringify(project.items)) throw new Error("Pattern items changed");
+        if (decoded.items[0].assetId !== decoded.assets[0].id) throw new Error("Asset reference changed");
+        const rejectsEnvelope = (label, change) => rejects(label, altered(envelope, change));
+        rejectsEnvelope("Wrong version", (copy) => { copy.version = 2; });
+        rejects("Corrupt JSON", "{");
+        rejects("Legacy project", JSON.stringify(project));
+        rejectsEnvelope("Unknown envelope field", (copy) => { copy.extra = true; });
+        rejectsEnvelope("Unknown asset field", (copy) => { copy.document.assets[0].src = "file.svg"; });
+        rejectsEnvelope("Duplicate asset IDs", (copy) => { copy.document.assets.push({ ...copy.document.assets[0] }); });
+        rejectsEnvelope("Duplicate item IDs", (copy) => { copy.document.items.push({ ...copy.document.items[0] }); });
+        rejectsEnvelope("Missing asset reference", (copy) => { copy.document.items[0].assetId = "absent"; });
+        rejectsEnvelope("Path-like asset ID", (copy) => { copy.document.assets[0].id = "../asset"; });
+        rejects("Oversized project bytes", `${encoded}${" ".repeat(16_000_000)}`);
+        rejectsEnvelope("Too many assets", (copy) => { copy.document.assets = Array.from({ length: 65 }, (_, n) => ({ id: `a${n}`, name: "Asset", originalSvg })); });
+        rejectsEnvelope("Too many items", (copy) => { copy.document.items = Array.from({ length: 257 }, (_, n) => ({ ...copy.document.items[0], id: `i${n}` })); });
+        rejectsEnvelope("Unsafe SVG", (copy) => { copy.document.assets[0].originalSvg = originalSvg.replace("<circle", "<script"); });
+        rejectsEnvelope("Oversized SVG dimensions", (copy) => { copy.document.assets[0].originalSvg = originalSvg.replace("0 0 10 10", "0 0 4097 10"); });
+        rejectsEnvelope("Non-finite item transform", (copy) => { copy.document.items[0].x = 1e400; });
+        rejectsEnvelope("Invalid flip type", (copy) => { copy.document.items[0].flipX = 1; });
+        rejectsEnvelope("Invalid tile mode", (copy) => { copy.document.tile.repeat = "freeform"; });
+        rejectsEnvelope("Unsafe tile color", (copy) => { copy.document.tile.backgroundColor = "url(https://example.invalid)"; });
+        rejectsEnvelope("Out-of-range transform", (copy) => { copy.document.items[0].scale = 101; });
+        const expensiveSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 2000"><rect width="2000" height="2000"/></svg>';
+        rejectsEnvelope("Aggregate SVG decode budget", (copy) => {
+          copy.document.assets = Array.from({ length: 5 }, (_, n) => ({ id: `large${n}`, name: "Large", originalSvg: expensiveSvg }));
+        });
+        result.textContent = "PASS: portable roundtrip and untrusted project rejection boundaries";
+      } catch (error) {
+        result.textContent = `FAIL: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    });
+  </script>
+</body>
+</html>

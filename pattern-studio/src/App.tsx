@@ -9,6 +9,13 @@ import { renderTileCanvas } from "./lib/pattern";
 import type { Asset, PatternItem, PreviewMode, Project, TileSettings } from "./lib/types";
 import { DEFAULT_TILE, uid, wrap } from "./lib/types";
 import { svgDataUrl, validateSvg } from "./lib/svg";
+import { decodeProject, encodeProject, MAX_PROJECT_BYTES } from "./lib/project";
+
+declare global {
+  interface Window {
+    __TAURI__?: { core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> } };
+  }
+}
 
 async function fabricSvgSource(source: string, parsed: Awaited<ReturnType<typeof loadSVGFromString>>) {
   const root = new DOMParser().parseFromString(source, "image/svg+xml").documentElement;
@@ -63,6 +70,8 @@ export default function App() {
   const [exportError, setExportError] = useState(false);
   const loadRef = useRef<HTMLInputElement>(null);
   const [exporting, setExporting] = useState(false);
+  const [projectBusy, setProjectBusy] = useState(false);
+  const projectIo = useRef(false);
   const [exportMessage, setExportMessage] = useState("");
   const [artifacts, setArtifacts] = useState<{ format: string; name: string; url: string }[]>([]);
   const artifactUrls = useRef(new Map<string, string>());
@@ -353,73 +362,95 @@ export default function App() {
     }
   }
 
-  function saveProject() {
+  async function saveProject() {
+    if (projectIo.current) return;
+    projectIo.current = true;
+    setProjectBusy(true);
+    const revision = documentRevision.current;
     try {
-      beginArtifact("project");
-      assertAssetPixelBudget(assets);
-      const project: Project = { name: projectName, tile, items, assets };
-      publishArtifact("project", "json", new Blob([JSON.stringify(project, null, 2)], { type: "application/json" }));
+      const snapshot = current.current;
+      const contents = encodeProject(snapshot);
+      const native = window.__TAURI__?.core;
+      if (native) {
+        const path = await native.invoke<string | null>("save_project", {
+          contents,
+          suggestedName: `${snapshot.name.replace(/[^\w-]+/g, "-") || "pattern"}.orsaven`,
+        });
+        if (revision !== documentRevision.current) return;
+        setExportMessage(path ? "Project tersimpan." : "Penyimpanan dibatalkan.");
+        setExportError(false);
+      } else {
+        beginArtifact("project");
+        publishArtifact("project", "orsaven", new Blob([contents], { type: "application/json" }), revision);
+      }
     } catch (error) {
-      setExportMessage(error instanceof Error ? error.message : "Project save failed");
+      if (revision !== documentRevision.current) return;
+      setExportMessage(error instanceof Error ? error.message : String(error));
       setExportError(true);
+    } finally {
+      projectIo.current = false;
+      setProjectBusy(false);
+    }
+  }
+
+  async function readProject(read: () => Promise<string | null>) {
+    if (projectIo.current) return;
+    if (history.current.past.length && !window.confirm("Buang perubahan project dan buka file ini?")) return;
+    projectIo.current = true;
+    setProjectBusy(true);
+    const request = ++generation.current;
+    const revision = documentRevision.current;
+    setImporting(true);
+    setImportMessage("Membuka project...");
+    setImportError(false);
+    try {
+      const contents = await read();
+      if (request !== generation.current) return;
+      if (contents === null) {
+        setImportMessage("Pembukaan dibatalkan.");
+        return;
+      }
+      const portable = decodeProject(contents);
+      const safeAssets: Asset[] = [];
+      for (const asset of portable.assets) {
+        const safeSvg = validateSvg(asset.originalSvg);
+        const parsed = await loadSVGFromString(safeSvg);
+        if (!parsed.objects.some(Boolean)) throw new Error(`${asset.name}: SVG project tidak dapat dibaca.`);
+        const fabricSvg = await fabricSvgSource(safeSvg, parsed);
+        safeAssets.push({ ...asset, fabricSvg, src: svgDataUrl(fabricSvg) });
+      }
+      assertAssetPixelBudget(safeAssets);
+      assertRasterBudget(portable.tile, portable.items, safeAssets);
+      if (request !== generation.current) return;
+      if (revision !== documentRevision.current) throw new Error("Dokumen berubah saat project dibaca. Buka ulang file agar edit terbaru tidak hilang.");
+      applyProject({ ...portable, assets: safeAssets });
+      setImportMessage("Project terbuka.");
+      setImportError(false);
+    } catch (error) {
+      if (request !== generation.current) return;
+      setImportMessage(error instanceof Error ? error.message : String(error));
+      setImportError(true);
+    } finally {
+      projectIo.current = false;
+      setProjectBusy(false);
+      if (request === generation.current) setImporting(false);
     }
   }
 
   function loadProjectFile(file: File) {
-    if (history.current.past.length && !window.confirm("Buang perubahan project dan buka file ini?")) return;
-    const request = ++generation.current;
-    if (file.size > 16_000_000) {
-      setImporting(false);
-      setImportMessage("Project exceeds 16 MB limit");
-      setImportError(true);
-      return;
-    }
-    setImporting(true);
-    setImportMessage("");
-    const reader = new FileReader();
-    reader.onerror = () => {
-      if (request !== generation.current) return;
-      setImporting(false);
-      setImportMessage("Project file could not be read");
-      setImportError(true);
-    };
-    reader.onload = async () => {
-      try {
-        const project = JSON.parse(String(reader.result)) as Project;
-        if (!Array.isArray(project.assets) || !Array.isArray(project.items) || project.assets.length > 64 || project.items.length > 256) throw new Error("Project exceeds supported asset or item counts");
-        const safeAssets: Asset[] = [];
-        for (const asset of project.assets) {
-          if (typeof asset.id !== "string" || typeof asset.name !== "string" || typeof asset.src !== "string") throw new Error("Project asset data is invalid");
-          let originalSvg = asset.originalSvg;
-          if (!originalSvg) {
-            if (!asset.src.startsWith("data:image/svg+xml") || asset.src.length > 400_000) throw new Error("Only bounded SVG assets are supported in project files");
-            const payload = asset.src.slice(asset.src.indexOf(",") + 1);
-            originalSvg = asset.src.includes(";base64,") ? atob(payload) : decodeURIComponent(payload);
-          }
-          const safeSvg = validateSvg(originalSvg);
-          assertAssetPixelBudget([...safeAssets, { ...asset, originalSvg, src: svgDataUrl(safeSvg) }]);
-          const parsed = await loadSVGFromString(safeSvg);
-          if (!parsed.objects.some(Boolean)) throw new Error(`${asset.name}: Fabric could not parse project SVG`);
-          const fabricSvg = await fabricSvgSource(safeSvg, parsed);
-          safeAssets.push({ ...asset, originalSvg, fabricSvg, src: svgDataUrl(fabricSvg) });
-        }
-        const safeTile = project.tile ?? DEFAULT_TILE;
-        if (!["grid", "brick", "half-drop", "mirror"].includes(safeTile.repeat) || !["dark", "checker", "light"].includes(safeTile.background)) throw new Error("Project tile settings are invalid");
-        assertAssetPixelBudget(safeAssets);
-        assertRasterBudget(safeTile, project.items, safeAssets);
-        if (request !== generation.current) return;
-        applyProject({ name: typeof project.name === "string" ? project.name : "Pattern tanpa judul", tile: safeTile, items: project.items, assets: safeAssets });
-        setImportMessage("Project opened");
-        setImportError(false);
-      } catch (error) {
-        if (request !== generation.current) return;
-        setImportMessage(error instanceof Error ? error.message : "Project file invalid");
-        setImportError(true);
-      } finally {
-        if (request === generation.current) setImporting(false);
-      }
-    };
-    reader.readAsText(file);
+    void readProject(async () => {
+      if (file.size > MAX_PROJECT_BYTES) throw new Error("Project melebihi batas 16 MB.");
+      return file.text();
+    });
+  }
+
+  function openProject() {
+    const native = window.__TAURI__?.core;
+    if (!native) { loadRef.current?.click(); return; }
+    void readProject(async () => {
+      const file = await native.invoke<{ path: string; contents: string } | null>("open_project");
+      return file?.contents ?? null;
+    });
   }
 
   return (
@@ -481,20 +512,21 @@ export default function App() {
           >
             Redo
           </button>
-          <button className="rounded-lg border border-border bg-card px-3 py-2" onClick={saveProject} aria-label="Save project JSON">
-            Simpan .json
+          <button disabled={projectBusy} className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50" onClick={saveProject} aria-label="Save portable project">
+            Simpan .orsaven
           </button>
           <button
-            className="rounded-lg border border-border bg-card px-3 py-2"
-            onClick={() => loadRef.current?.click()}
-            aria-label="Open project JSON"
+            disabled={projectBusy}
+            className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50"
+            onClick={openProject}
+            aria-label="Open portable project"
           >
-            Buka .json
+            Buka .orsaven
           </button>
           <input
             ref={loadRef}
             type="file"
-            accept=".json,application/json"
+            accept=".orsaven,application/json"
             className="hidden"
             onChange={(event) => {
               const file = event.target.files?.[0];

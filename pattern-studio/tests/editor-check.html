@@ -45,11 +45,11 @@
       input.dispatchEvent(new doc.defaultView.Event('change', { bubbles: true }));
     }
     async function savedProject(doc) {
-      const previous = [...doc.querySelectorAll('a[download]')].find(entry => entry.download.endsWith('.json'))?.href;
-      button(doc, 'Save project JSON').click();
-      await until(() => [...doc.querySelectorAll('a[download]')].some(entry => entry.download.endsWith('.json') && entry.href !== previous), 'Project tidak tersedia');
-      const link = [...doc.querySelectorAll('a[download]')].find(entry => entry.download.endsWith('.json'));
-      return (await fetch(link.href)).json();
+      const previous = [...doc.querySelectorAll('a[download]')].find(entry => entry.download.endsWith('.orsaven'))?.href;
+      button(doc, 'Save portable project').click();
+      await until(() => [...doc.querySelectorAll('a[download]')].some(entry => entry.download.endsWith('.orsaven') && entry.href !== previous), 'Project tidak tersedia');
+      const link = [...doc.querySelectorAll('a[download]')].find(entry => entry.download.endsWith('.orsaven'));
+      return (await (await fetch(link.href)).json()).document;
     }
     document.querySelector('#run').onclick = async () => {
       result.textContent = 'RUNNING';
@@ -150,12 +150,21 @@
         await pause();
         await until(() => !doc.querySelector('[aria-busy="true"]') && doc.querySelector('[role="alert"]'), 'Library tidak menampilkan error');
         if (JSON.stringify(await savedProject(doc)) !== JSON.stringify(undoneImport)) throw new Error('Import gagal mengubah dokumen kerja');
-        chooseFile(doc, new doc.defaultView.File(['{invalid'], 'broken.json', { type: 'application/json' }), '.json');
+        chooseFile(doc, new doc.defaultView.File(['{invalid'], 'broken.orsaven', { type: 'application/json' }), '.orsaven');
         await pause();
         await until(() => !doc.querySelector('[aria-busy="true"]') && doc.querySelector('[role="alert"]'), 'Project rusak tidak ditolak');
         if (JSON.stringify(await savedProject(doc)) !== JSON.stringify(undoneImport)) throw new Error('Project rusak merusak dokumen kerja');
         const empty = { name: 'Library kosong', tile: project.tile, items: [], assets: [] };
-        chooseFile(doc, new doc.defaultView.File([JSON.stringify(empty)], 'empty.json', { type: 'application/json' }), '.json');
+        let resumeOpen;
+        const delayedProject = new doc.defaultView.File([JSON.stringify({ format: 'orsaven', version: 1, document: empty })], 'delayed.orsaven', { type: 'application/json' });
+        Object.defineProperty(delayedProject, 'text', { value: () => new Promise(resolve => { resumeOpen = resolve; }) });
+        chooseFile(doc, delayedProject, '.orsaven');
+        await until(() => resumeOpen && button(doc, 'Save portable project').disabled, 'Pembacaan project tidak dimulai');
+        changeValue(doc.querySelector('[aria-label="Nama pattern"]'), 'Edit selama buka');
+        resumeOpen(await delayedProject.arrayBuffer().then(buffer => new TextDecoder().decode(buffer)));
+        await until(() => !button(doc, 'Save portable project').disabled, 'Pembacaan tertunda tidak selesai');
+        if (!doc.querySelector('[role="alert"]') || JSON.stringify(await savedProject(doc)) !== JSON.stringify({ ...undoneImport, name: 'Edit selama buka' })) throw new Error('Pembukaan file menimpa edit yang berlangsung selama pembacaan');
+        chooseFile(doc, new doc.defaultView.File([JSON.stringify({ format: 'orsaven', version: 1, document: empty })], 'empty.orsaven', { type: 'application/json' }), '.orsaven');
         await until(() => doc.querySelector('[aria-label="Nama pattern"]').value === empty.name && !doc.querySelector('[aria-busy="true"]'), 'Project library kosong tidak terbuka');
         if (doc.querySelector('button[title^="Tambah"]') || !button(doc, 'Undo').disabled) throw new Error('Project kosong masih menyimpan aset atau history project lama');
         const emptyState = await savedProject(doc);
