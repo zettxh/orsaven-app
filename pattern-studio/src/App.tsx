@@ -12,7 +12,7 @@ import { svgDataUrl, validateSvg } from "./lib/svg";
 
 async function fabricSvgSource(source: string, parsed: Awaited<ReturnType<typeof loadSVGFromString>>) {
   const root = new DOMParser().parseFromString(source, "image/svg+xml").documentElement;
-  const box = root.getAttribute("viewBox")?.trim().split(/[\\s,]+/).map(Number);
+  const box = root.getAttribute("viewBox")?.trim().split(/[\s,]+/).map(Number);
   const width = Number(root.getAttribute("width") || box?.[2]);
   const height = Number(root.getAttribute("height") || box?.[3]);
   const viewBox = root.getAttribute("viewBox") || `0 0 ${width} ${height}`;

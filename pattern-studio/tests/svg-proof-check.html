@@ -57,6 +57,29 @@
       input.dispatchEvent(new view.Event("change", { bubbles: true }));
       await until(() => [...doc.querySelectorAll('[role="status"], [role="alert"]')].some((entry) => entry.textContent.includes(name) && entry.textContent.includes(expected)), `${name} did not reach expected status`);
     }
+    async function projectArtifact(doc) {
+      const previous = [...doc.querySelectorAll("a[download]")].find((link) => link.textContent.includes("PROJECT"))?.href;
+      button(doc, /Simpan \.json/).click();
+      await until(() => {
+        const link = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes("PROJECT"));
+        return link && link.href !== previous;
+      }, "Project JSON artifact link missing or stale");
+      const link = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes("PROJECT"));
+      const response = await fetch(link.href);
+      if (!response.ok) throw new Error(`Project JSON fetch failed: ${response.status}`);
+      return response.json();
+    }
+    async function reopenProject(doc, project) {
+      const view = doc.defaultView;
+      const input = [...doc.querySelectorAll('input[type="file"]')].find((entry) => entry.accept.includes(".json"));
+      if (!input) throw new Error("Project JSON input missing");
+      const file = new view.File([JSON.stringify(project)], "project.json", { type: "application/json" });
+      const transfer = new view.DataTransfer();
+      transfer.items.add(file);
+      Object.defineProperty(input, "files", { configurable: true, value: transfer.files });
+      input.dispatchEvent(new view.Event("change", { bubbles: true }));
+      await until(() => [...doc.querySelectorAll('[role="status"], [role="alert"]')].some((entry) => entry.textContent.includes("Project opened") || entry.textContent.includes("SVG intrinsic dimensions")), "Project open did not complete");
+    }
     async function artifact(doc, control, format) {
       const previous = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes(format))?.href;
       button(doc, control).click();
@@ -211,13 +234,16 @@
         assertAsymmetricPoints(jpeg, "JPEG corner export", 40, true);
         if (jpeg.pixel(0, 0).some((value, index) => index < 3 && value < 245)) throw new Error("JPEG output must flatten transparent tile onto white");
 
-        result.textContent = "Checking project JSON source preservation…";
-        button(doc, /Simpan \.json/).click();
-        await until(() => [...doc.querySelectorAll("a[download]")].some((link) => link.textContent.includes("PROJECT")), "Project JSON artifact link missing");
-        const projectLink = [...doc.querySelectorAll("a[download]")].find((link) => link.textContent.includes("PROJECT"));
-        const projectResponse = await fetch(projectLink.href);
-        const project = await projectResponse.json();
+        result.textContent = "Checking project JSON source preservation and viewBox-only asset reopening…";
+        const project = await projectArtifact(doc);
         if (project.assets.find((asset) => asset.name === "svg-proof-asymmetric.svg")?.originalSvg !== fixture) throw new Error("Project artifact did not preserve exact original SVG source");
+        await reopenProject(doc, project);
+        const openStatus = [...doc.querySelectorAll('[role="status"], [role="alert"]')].find((entry) => entry.textContent.includes("Project opened") || entry.textContent.includes("SVG intrinsic dimensions"));
+        if (!openStatus?.textContent.includes("Project opened")) throw new Error(`Saved project failed to reopen: ${openStatus?.textContent}`);
+        const reopenedFooter = doc.querySelector("footer")?.textContent ?? "";
+        if (!reopenedFooter.includes("1 item") || !reopenedFooter.includes("6 aset")) throw new Error("Reopened project did not restore one item and six assets");
+        const reopenedSource = await projectArtifact(doc);
+        if (reopenedSource.assets.find((asset) => asset.name === "svg-proof-asymmetric.svg")?.originalSvg !== fixture) throw new Error("Reopened project did not preserve original SVG source");
 
         result.textContent = "Checking unsafe SVG rejection and document preservation…";
         const unsafe = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><script>window.__svgProofExecuted=true;fetch("https://invalid.example/proof");</scr' + 'ipt><image href="https://invalid.example/pixel.png"/></svg>';
@@ -351,7 +377,7 @@
         };
         await compareInterior(affineSvg, "Downloaded affine SVG");
         await compareInterior(affinePng, "Downloaded affine PNG");
-        result.textContent = "PASS: real SVG import, Fabric-derived SVG + source retention, clipping, collision-safe vector export, corner/rotation/oversize raster points, evenodd clip geometry under nonzero consumers, affine clipped stroke geometry in SVG and PNG, live preview and ghost fade, transparent PNG, white JPEG, and rejection preservation.";
+        result.textContent = "PASS: real SVG import, Fabric-derived SVG + source retention, clipping, collision-safe vector export, corner/rotation/oversize raster points, evenodd clip geometry under nonzero consumers, affine clipped stroke geometry in SVG and PNG, live preview and ghost fade, transparent PNG, white JPEG, project JSON preservation and viewBox-only asset reopening, and rejection preservation.";
       } catch (error) {
         result.textContent = `FAIL: ${error instanceof Error ? error.message : String(error)}`;
         throw error;
