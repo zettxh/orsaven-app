@@ -1,0 +1,103 @@
+name: Windows x64 NSIS build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64-nsis:
+    name: windows-x64-nsis
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      # v4.2.2 — https://github.com/actions/checkout
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # v4.4.0 — https://github.com/actions/setup-node
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      # stable at 683b588c — https://github.com/dtolnay/rust-toolchain
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Record runner capacity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $os = Get-CimInstance Win32_OperatingSystem
+          $memory = Get-CimInstance Win32_ComputerSystem
+          $workspace = Get-Item $env:GITHUB_WORKSPACE
+          $volume = Get-PSDrive -Name $workspace.PSDrive.Name
+          $processes = Get-Process
+          $capacity = @"
+          OS: $($os.Caption) $($os.Version) (build $($os.BuildNumber))
+          Total RAM bytes: $([int64]$memory.TotalPhysicalMemory)
+          Free RAM bytes: $([int64]$os.FreePhysicalMemory * 1KB)
+          Workspace volume: $($volume.Name)
+          Workspace volume free bytes: $([int64]$volume.Free)
+          cargo.exe process count: $(@($processes | Where-Object ProcessName -eq 'cargo').Count)
+          rustc.exe process count: $(@($processes | Where-Object ProcessName -eq 'rustc').Count)
+          cl.exe process count: $(@($processes | Where-Object ProcessName -eq 'cl').Count)
+          "@
+          Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'pattern-studio/runner-capacity.txt') -Value $capacity -Encoding utf8
+          Write-Output $capacity
+
+      - name: Install npm dependencies
+        working-directory: pattern-studio
+        run: npm ci
+
+      - name: Build NSIS installer
+        working-directory: pattern-studio
+        run: npm run tauri:build -- --target x86_64-pc-windows-msvc
+
+      - name: Prepare build metadata and checksum
+        shell: pwsh
+        working-directory: pattern-studio
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installers = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer in $bundleDir; found $($installers.Count)" }
+          $installer = $installers[0].FullName
+          if (-not (Test-Path -LiteralPath 'src-tauri/Cargo.lock' -PathType Leaf)) { throw 'Cargo.lock not found after build' }
+          $metadata = @"
+          Runner OS: $env:RUNNER_OS
+          Runner image: $env:ImageOS $env:ImageVersion
+          Node: $(node --version)
+          Rust: $(rustc --version)
+          Cargo: $(cargo --version)
+          Target: x86_64-pc-windows-msvc
+          Source commit: $env:GITHUB_SHA
+          Workflow run: $env:GITHUB_RUN_ID
+          Workflow attempt: $env:GITHUB_RUN_ATTEMPT
+          Workflow: $env:GITHUB_WORKFLOW
+          "@
+          Set-Content -LiteralPath 'build-metadata.txt' -Value $metadata -Encoding utf8
+          $files = @($installer, 'src-tauri/Cargo.lock', 'build-metadata.txt', 'runner-capacity.txt')
+          $manifest = foreach ($file in $files) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            $relativePath = [System.IO.Path]::GetRelativePath((Get-Location).Path, (Resolve-Path -LiteralPath $file).Path).Replace('\', '/')
+            "$hash  $relativePath"
+          }
+          $manifest | Set-Content -LiteralPath 'SHA256SUMS.txt' -Encoding ascii
+
+      # v4.6.2 — https://github.com/actions/upload-artifact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-x64-nsis
+          path: |
+            pattern-studio/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            pattern-studio/src-tauri/Cargo.lock
+            pattern-studio/build-metadata.txt
+            pattern-studio/SHA256SUMS.txt
+            pattern-studio/runner-capacity.txt
+          if-no-files-found: error
+          retention-days: 7

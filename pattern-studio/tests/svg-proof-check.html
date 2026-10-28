@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SVG proof browser check</title>
+  <style>
+    body { margin: 1rem; color: #202020; font: 16px system-ui, sans-serif; }
+    button { min-height: 44px; padding: .5rem 1rem; }
+    iframe { width: 100%; height: 760px; border: 1px solid #888; }
+    #result { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>SVG proof: actual editor and file artifacts</h1>
+  <p>Imports checked-in asymmetric fixture through file input, transforms item through editor controls, then checks preview and downloaded SVG/PNG/JPG/JSON bytes.</p>
+  <button id="run" type="button">Run browser check</button>
+  <pre id="result" role="status" aria-live="polite">Not run</pre>
+  <iframe title="Pattern Studio editor" src="/"></iframe>
+  <script type="module">
+    const result = document.querySelector("#result");
+    const pause = (ms = 80) => new Promise((resolve) => setTimeout(resolve, ms));
+    async function until(predicate, message) {
+      const end = Date.now() + 15000;
+      while (Date.now() < end) {
+        if (predicate()) return;
+        await pause();
+      }
+      throw new Error(message);
+    }
+    function button(doc, expression) {
+      const found = [...doc.querySelectorAll("button")].find((entry) => expression.test(entry.textContent));
+      if (!found) throw new Error(`Editor control missing: ${expression}`);
+      return found;
+    }
+    function inputInLabel(doc, exact, partial = false) {
+      const label = [...doc.querySelectorAll("label")].find((entry) => partial ? entry.textContent.includes(exact) : entry.textContent.trim() === exact);
+      const input = label?.querySelector("input");
+      if (!input) throw new Error(`Editor field missing: ${exact}`);
+      return input;
+    }
+    function changeValue(input, value) {
+      const view = input.ownerDocument.defaultView;
+      const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+      setter.call(input, String(value));
+      input.dispatchEvent(new view.Event("input", { bubbles: true }));
+      input.dispatchEvent(new view.Event("change", { bubbles: true }));
+    }
+    async function importFile(doc, name, source, expected) {
+      const view = doc.defaultView;
+      const input = [...doc.querySelectorAll('input[type="file"]')].find((entry) => entry.accept.includes(".svg"));
+      if (!input) throw new Error("SVG file input missing");
+      const file = new view.File([source], name, { type: "image/svg+xml" });
+      const transfer = new view.DataTransfer();
+      transfer.items.add(file);
+      Object.defineProperty(input, "files", { configurable: true, value: transfer.files });
+      input.dispatchEvent(new view.Event("change", { bubbles: true }));
+      await until(() => [...doc.querySelectorAll('[role="status"], [role="alert"]')].some((entry) => entry.textContent.includes(name) && entry.textContent.includes(expected)), `${name} did not reach expected status`);
+    }
+    async function artifact(doc, control, format) {
+      const previous = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes(format))?.href;
+      button(doc, control).click();
+      await until(() => {
+        const link = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes(format));
+        return link && link.href !== previous;
+      }, `${format} artifact was missing or stale`);
+      const link = [...doc.querySelectorAll("a[download]")].find((entry) => entry.textContent.includes(format));
+      const response = await fetch(link.href);
+      if (!response.ok) throw new Error(`${format} artifact fetch failed: ${response.status}`);
+      return response.blob();
+    }
+    async function rasterPixels(blob, label) {
+      const url = URL.createObjectURL(blob);
+      try {
+        const image = new Image();
+        const { promise, resolve, reject } = Promise.withResolvers();
+        image.onload = resolve;
+        image.onerror = () => reject(new Error(`${label} image failed to load`));
+        const timer = setTimeout(() => reject(new Error(`${label} image load timed out after 15s`)), 15000);
+        try {
+          image.src = url;
+          await promise;
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!image.naturalWidth || !image.naturalHeight) throw new Error(`${label} image loaded without dimensions`);
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.drawImage(image, 0, 0);
+        return { width: canvas.width, height: canvas.height, pixel: (x, y) => [...context.getImageData(x, y, 1, 1).data] };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+    function color(pixel, rgb, tolerance = 12) {
+      return pixel[3] > 240 && rgb.every((component, index) => Math.abs(pixel[index] - component) < tolerance);
+    }
+    async function assertLivePreview(doc) {
+      const view = doc.defaultView;
+      const preview = [...doc.querySelectorAll("select")].find((entry) => [...entry.options].some((option) => option.value === "fill"));
+      const setter = Object.getOwnPropertyDescriptor(view.HTMLSelectElement.prototype, "value").set;
+      setter.call(preview, "fill");
+      preview.dispatchEvent(new view.Event("change", { bubbles: true }));
+      changeValue(inputInLabel(doc, "Zoom", true), 60);
+      const expected = [75, 155, 131];
+      const distance = (pixel) => Math.hypot(pixel[0] - expected[0], pixel[1] - expected[1], pixel[2] - expected[2]);
+      await until(() => {
+        const canvas = doc.querySelector("main canvas");
+        if (!canvas) return false;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        const pixel = (x, y) => [...context.getImageData(Math.round(x), Math.round(y), 1, 1).data];
+        const active = pixel(26 * 0.6, 490 * 0.6);
+        const ghost = pixel((512 + 26) * 0.6, 490 * 0.6);
+        return distance(active) < 35 && distance(ghost) > distance(active) + 20;
+      }, "Live preview missed active tile corner or failed to fade ghost repeat");
+    }
+    function assertAsymmetricPoints(image, prefix, tolerance = 12, opaqueHole = false) {
+      if (image.width !== 512 || image.height !== 512) throw new Error(`${prefix}: expected 512x512 output`);
+      if (!color(image.pixel(26, 490), [75, 155, 131], tolerance)) throw new Error(`${prefix}: teal point missed corner wrap at 26,490`);
+      if (!color(image.pixel(460, 476), [217, 164, 65], tolerance)) throw new Error(`${prefix}: gold point missed corner wrap at 460,476`);
+      if (!color(image.pixel(32, 31), [197, 83, 72], tolerance)) throw new Error(`${prefix}: red point missed corner wrap at 32,31`);
+      const hole = image.pixel(476, 494);
+      if (opaqueHole ? !color(hole, [255, 255, 255], tolerance) : hole[3] > 8) throw new Error(`${prefix}: clipped hole is not preserved at 476,494`);
+    }
+    function assertSvg(svgText) {
+      const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+      if (doc.querySelector("parsererror") || doc.documentElement.localName !== "svg") throw new Error("SVG artifact is not well-formed SVG");
+      if (!doc.querySelectorAll("path").length || doc.querySelector("image, script, foreignObject")) throw new Error("SVG artifact lost vector geometry or contains bitmap/active content");
+      const ids = [...doc.querySelectorAll("[id]")].map((node) => node.id);
+      if (ids.length !== new Set(ids).size) throw new Error("SVG artifact has colliding IDs");
+      for (const [, id] of svgText.matchAll(/url\(#([\w.-]+)\)/g)) if (!ids.includes(id)) throw new Error(`SVG artifact has broken internal reference: ${id}`);
+      if ([...doc.querySelectorAll("*")].some((node) => [...node.attributes].some((attribute) => attribute.localName === "href" && !attribute.value.startsWith("#")))) throw new Error("SVG artifact contains external resource reference");
+      if ([...doc.querySelectorAll("[style]")].some((node) => (node.getAttribute("style") ?? "").toLowerCase().includes("url(") && !(node.getAttribute("style") ?? "").toLowerCase().includes("url(#"))) throw new Error("SVG artifact contains external style reference");
+    }
+    async function removeLayer(doc, coordinate, count) {
+      const layer = [...doc.querySelectorAll("button")].find((entry) => entry.textContent.includes(coordinate));
+      if (!layer) throw new Error(`Default layer not found: ${coordinate}`);
+      layer.click();
+      await until(() => [...doc.querySelectorAll("button")].some((entry) => entry.textContent.includes(coordinate) && entry.className.includes("border-ring")), `Layer selection did not update: ${coordinate}`);
+      button(doc, /Hapus item/).click();
+      await until(() => (doc.querySelector("footer")?.textContent ?? "").includes(`${count - 1} item`), `Layer removal did not complete: ${coordinate}`);
+    }
+    async function selectTransformableLayer(doc, coordinate) {
+      const layer = [...doc.querySelectorAll("button")].find((entry) => entry.textContent.includes(coordinate));
+      if (!layer) throw new Error(`Fixture layer not found: ${coordinate}`);
+      layer.click();
+      await until(() => {
+        const selected = [...doc.querySelectorAll("button")].some((entry) => entry.textContent.includes(coordinate) && entry.className.includes("border-ring"));
+        const scale = [...doc.querySelectorAll("label")].find((entry) => entry.textContent.includes("Skala"))?.querySelector("input");
+        return selected && scale;
+      }, "Fixture selection did not expose transform controls");
+    }
+    document.querySelector("#run").addEventListener("click", async () => {
+      result.textContent = "Running actual editor flow…";
+      try {
+        const frame = document.querySelector("iframe");
+        await until(() => frame.contentDocument?.readyState === "complete", "Editor load timeout");
+        const doc = frame.contentDocument;
+        const fixtureResponse = await fetch("/tests/fixtures/svg-proof-asymmetric.svg");
+        if (!fixtureResponse.ok) throw new Error(`Fixture HTTP ${fixtureResponse.status}`);
+        const fixture = await fixtureResponse.text();
+        await importFile(doc, "svg-proof-asymmetric.svg", fixture, "imported");
+        await until(() => [...doc.querySelectorAll("button")].some((entry) => entry.textContent.includes("svg-proof-asymmetric.svg")), "Fixture did not appear in asset library");
+        await removeLayer(doc, "128, 128", 4);
+        await removeLayer(doc, "384, 384", 3);
+        await removeLayer(doc, "384, 128", 2);
+        await until(() => (doc.querySelector("footer")?.textContent ?? "").includes("1 item"), "Could not isolate imported fixture");
+        const originalCount = doc.querySelector("footer")?.textContent ?? "";
+        if (!originalCount.includes("1 item") || !originalCount.includes("6 aset")) throw new Error("Import did not create one fixture item after clearing starter objects");
+        await selectTransformableLayer(doc, "256, 256");
+        const rotation = inputInLabel(doc, "Rotasi", true);
+        const runtimeErrors = [];
+        const onRuntimeError = (event) => runtimeErrors.push(event.message);
+        frame.contentWindow.addEventListener("error", onRuntimeError);
+        try {
+          const view = frame.contentWindow;
+          const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+          for (let value = -40; value < 40; value++) {
+            setter.call(rotation, String(value));
+            rotation.dispatchEvent(new view.Event("input", { bubbles: true }));
+          }
+          await until(() => [...doc.querySelectorAll('input[type="range"][min="-180"][max="180"]')].every((input) => input.value === "39"), "Batched rotation edits did not reach both panels");
+          if (runtimeErrors.length) throw new Error(`Batched rotation edits raised runtime error: ${runtimeErrors.join("; ")}`);
+        } finally {
+          frame.contentWindow.removeEventListener("error", onRuntimeError);
+        }
+        changeValue(rotation, 0);
+        await until(() => [...doc.querySelectorAll('input[type="range"][min="-180"][max="180"]')].every((input) => input.value === "0"), "Rotation did not reset after batched-edit regression");
+
+        const scale = inputInLabel(doc, "Skala", true);
+
+        changeValue(inputInLabel(doc, "X"), 0);
+        changeValue(inputInLabel(doc, "Y"), 0);
+        changeValue(rotation, 0);
+        changeValue(scale, 100);
+        result.textContent = "Checking live preview pixels…";
+        await assertLivePreview(doc);
+        result.textContent = "Generating and rasterizing SVG artifact…";
+        const svgBlob = await artifact(doc, /Export SVG/, "SVG");
+        const svgText = await svgBlob.text();
+        assertSvg(svgText);
+        assertAsymmetricPoints(await rasterPixels(svgBlob, "SVG"), "SVG artifact geometry");
+        result.textContent = "Generating and checking PNG artifact…";
+        const pngBlob = await artifact(doc, /Export PNG/, "PNG");
+        assertAsymmetricPoints(await rasterPixels(pngBlob, "PNG"), "PNG corner export");
+        result.textContent = "Generating and checking JPEG artifact…";
+        const jpegBlob = await artifact(doc, /Export JPG/, "JPEG");
+        const jpeg = await rasterPixels(jpegBlob, "JPEG");
+        assertAsymmetricPoints(jpeg, "JPEG corner export", 40, true);
+        if (jpeg.pixel(0, 0).some((value, index) => index < 3 && value < 245)) throw new Error("JPEG output must flatten transparent tile onto white");
+
+        result.textContent = "Checking project JSON source preservation…";
+        button(doc, /Simpan \.json/).click();
+        await until(() => [...doc.querySelectorAll("a[download]")].some((link) => link.textContent.includes("PROJECT")), "Project JSON artifact link missing");
+        const projectLink = [...doc.querySelectorAll("a[download]")].find((link) => link.textContent.includes("PROJECT"));
+        const projectResponse = await fetch(projectLink.href);
+        const project = await projectResponse.json();
+        if (project.assets.find((asset) => asset.name === "svg-proof-asymmetric.svg")?.originalSvg !== fixture) throw new Error("Project artifact did not preserve exact original SVG source");
+
+        result.textContent = "Checking unsafe SVG rejection and document preservation…";
+        const unsafe = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><script>window.__svgProofExecuted=true;fetch("https://invalid.example/proof");</scr' + 'ipt><image href="https://invalid.example/pixel.png"/></svg>';
+        await importFile(doc, "unsafe.svg", unsafe, "Unsupported SVG element");
+        const alertText = doc.querySelector('[role="alert"]')?.textContent ?? "";
+        if (!alertText.includes("Unsupported SVG element")) throw new Error("Unsafe SVG did not produce clear rejection");
+        const afterReject = doc.querySelector("footer")?.textContent ?? "";
+        if (!afterReject.includes("1 item") || !afterReject.includes("6 aset") || frame.contentWindow.__svgProofExecuted) throw new Error("Rejected input changed document or executed content");
+        if (frame.contentWindow.performance.getEntriesByType("resource").some((entry) => entry.name.includes("invalid.example"))) throw new Error("Rejected SVG triggered external resource request");
+        const multiShapeClip = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><defs><clipPath id="two"><rect width="8" height="8"/><circle cx="8" cy="8" r="2"/></clipPath></defs><rect width="16" height="16" clip-path="url(#two)"/></svg>';
+        result.textContent = "Checking multi-shape clipPath rejection…";
+        await importFile(doc, "multiple-clips.svg", multiShapeClip, "Multiple shapes in internal clipPaths are not supported");
+        const clipRejection = doc.querySelector('[role="alert"]')?.textContent ?? "";
+        const afterClipReject = doc.querySelector("footer")?.textContent ?? "";
+        if (!clipRejection.includes("Multiple shapes in internal clipPaths") || !afterClipReject.includes("1 item") || !afterClipReject.includes("6 aset")) throw new Error("Unsupported multi-shape clipPath changed document or lacked clear rejection");
+
+        result.textContent = "Reimporting source to check ID collisions…";
+        await importFile(doc, "svg-proof-asymmetric-again.svg", fixture, "imported");
+        await until(() => (doc.querySelector("footer")?.textContent ?? "").includes("2 item"), "Second valid asset was not imported");
+        const collisionSvg = await artifact(doc, /Export SVG/, "SVG");
+        result.textContent = "Checking collision-safe SVG artifact…";
+        assertSvg(await collisionSvg.text());
+        changeValue(inputInLabel(doc, "X"), 0);
+        changeValue(inputInLabel(doc, "Y"), 0);
+        changeValue(inputInLabel(doc, "Skala", true), 300);
+        changeValue(inputInLabel(doc, "Rotasi", true), 45);
+
+        result.textContent = "Checking rotated PNG landmarks…";
+        const rotatedPng = await artifact(doc, /Export PNG/, "PNG");
+        const rotated = await rasterPixels(rotatedPng);
+        if (!color(rotated.pixel(102, 9), [75, 155, 131])) throw new Error("Rotated teal landmark missed expected point 102,9");
+        if (!color(rotated.pixel(4, 140), [197, 83, 72])) throw new Error("Rotated red landmark missed expected point 4,140");
+
+        result.textContent = "Reducing tile to test oversized wrapped object…";
+        changeValue(inputInLabel(doc, "Lebar (px)"), 128);
+        changeValue(inputInLabel(doc, "Tinggi (px)"), 128);
+        result.textContent = "Checking actual oversized wrapped PNG…";
+        const oversizedPng = await artifact(doc, /Export PNG/, "PNG");
+        const oversized = await rasterPixels(oversizedPng);
+        if (oversized.width !== 128 || oversized.height !== 128) throw new Error("Oversized test did not export a 128x128 tile");
+        if (!color(oversized.pixel(4, 12), [197, 83, 72])) throw new Error("Oversized red landmark missed expected wrapped point 4,12");
+        result.textContent = "Checking imported evenodd clips in SVG and nonzero consumers…";
+        const evenoddCases = [
+          { name: "nested-island-hole", d: "M16 16H240V240H16Z M64 64H192V192H64Z M96 96H160V160H96Z", points: [[32, 32, true], [80, 80, false], [128, 128, true]] },
+          { name: "xor-rectangles", d: "M16 16H160V160H16Z M96 96H240V240H96Z", points: [[48, 48, true], [128, 128, false], [208, 208, true]] },
+          { name: "bowtie", d: "M24 24L232 232L24 232L232 24Z", points: [[128, 48, true], [40, 128, false], [128, 208, true]] },
+          { name: "curved-loops", d: "M16 128C16 40 160 40 160 128C160 216 16 216 16 128Z M96 128C96 40 240 40 240 128C240 216 96 216 96 128Z", points: [[40, 128, true], [128, 128, false], [216, 128, true]] },
+          { name: "implicit-holes", d: "M16 16H240V240H16 M64 64H192V192H64 M96 96H160V160H96", points: [[32, 32, true], [80, 80, false], [128, 128, true]] },
+          { name: "cancelled-contours", d: "M16 16H240V240H16Z M16 16H240V240H16Z", points: [[48, 48, false], [128, 128, false], [208, 208, false]] },
+        ];
+        const assertClipPoints = (image, testCase, prefix) => {
+          for (const [x, y, filled] of testCase.points) {
+            const pixel = image.pixel(16 + Math.round(x * 0.375), 16 + Math.round(y * 0.375));
+            if (color(pixel, [220, 40, 40]) !== filled) throw new Error(`${prefix} ${testCase.name}: q${x},${y} expected ${filled ? "filled" : "hole"}`);
+          }
+        };
+        for (const testCase of evenoddCases) {
+          const layers = [...doc.querySelectorAll("button")].filter((entry) => /Layer \d+ ·/.test(entry.textContent));
+          for (const [index, layer] of layers.entries()) {
+            layer.click();
+            await until(() => [...doc.querySelectorAll("button")].some((entry) => entry.textContent.includes(layer.textContent.trim()) && entry.className.includes("border-ring")), "Layer selection did not update");
+            button(doc, /Hapus item/).click();
+            await until(() => (doc.querySelector("footer")?.textContent ?? "").includes(`${layers.length - index - 1} item`), "Layer removal did not complete");
+          }
+          await until(() => (doc.querySelector("footer")?.textContent ?? "").includes("0 item"), "Could not clear all layers");
+          const source = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><defs><clipPath id="clip"><path clip-rule="evenodd" d="${testCase.d}"/></clipPath></defs><rect width="256" height="256" fill="#dc2828" clip-path="url(#clip)"/></svg>`;
+          await importFile(doc, `evenodd-${testCase.name}.svg`, source, "imported");
+          await until(() => (doc.querySelector("footer")?.textContent ?? "").includes("1 item"), "Evenodd import did not create one layer");
+          await selectTransformableLayer(doc, "64, 64");
+          changeValue(inputInLabel(doc, "X"), 64);
+          changeValue(inputInLabel(doc, "Y"), 64);
+          changeValue(inputInLabel(doc, "Skala", true), 300);
+          const svg = await artifact(doc, /Export SVG/, "SVG");
+          const svgText = await svg.text();
+          if (testCase.points.some(([, , filled]) => filled)) assertSvg(svgText);
+          assertClipPoints(await rasterPixels(svg), testCase, "Downloaded SVG");
+          const nonzeroDoc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+          if (nonzeroDoc.querySelector("parsererror")) throw new Error(`${testCase.name}: downloaded SVG could not be parsed`);
+          for (const clip of nonzeroDoc.querySelectorAll("clipPath")) {
+            const path = clip.querySelector("path");
+            if (path && path.getTotalLength() === 0 && clip.id) {
+              for (const owner of nonzeroDoc.querySelectorAll(`[clip-path="url(#${clip.id})"]`)) owner.removeAttribute("clip-path");
+            }
+            if (path) {
+              path.removeAttribute("fill-rule");
+              path.removeAttribute("clip-rule");
+              const style = path.style;
+              style.removeProperty("fill-rule");
+              style.removeProperty("clip-rule");
+            }
+          }
+          const nonzeroBlob = new Blob([new XMLSerializer().serializeToString(nonzeroDoc)], { type: "image/svg+xml" });
+          assertClipPoints(await rasterPixels(nonzeroBlob, `nonzero ${testCase.name}`), testCase, "Nonzero consumer");
+        }
+        result.textContent = "Checking affine transforms, clipped dashed strokes, and inherited/default strokes against original-source geometry…";
+        const layers = [...doc.querySelectorAll("button")].filter((entry) => /Layer \d+ ·/.test(entry.textContent));
+        for (const [index, layer] of layers.entries()) {
+          layer.click();
+          await until(() => [...doc.querySelectorAll("button")].some((entry) => entry.textContent.includes(layer.textContent.trim()) && entry.className.includes("border-ring")), "Layer selection did not update");
+          button(doc, /Hapus item/).click();
+          await until(() => (doc.querySelector("footer")?.textContent ?? "").includes(`${layers.length - index - 1} item`), "Layer removal did not complete");
+        }
+        await until(() => (doc.querySelector("footer")?.textContent ?? "").includes("0 item"), "Could not clear all layers");
+        const affineBody = "<defs><clipPath id='affine-clip'><path clip-rule='evenodd' transform='translate(3 5)' d='M20 20H236V236H20Z M92 72H160V164H92Z'/></clipPath></defs><g transform='translate(12 8) matrix(1 .15 -.1 1 8 4)' clip-path='url(#affine-clip)' stroke-width='4'><path d='M32 52 C84 4 168 224 216 64' fill='none' stroke='#4b9b83' stroke-width='12' stroke-dasharray='18 10' stroke-dashoffset='5' stroke-linecap='round'/><rect x='40' y='176' width='120' height='20' fill='#d9a441' stroke='#c55348'/><circle cx='180' cy='190' r='20' fill='#4b9b83' stroke='#202020'/></g><line x1='40' y1='220' x2='220' y2='220' stroke='#c55348'/><svg x='160' y='16' width='72' height='48' viewBox='20 10 120 80'><rect x='28' y='18' width='104' height='64' fill='#c55348'/><path d='M20 10L140 90' fill='none' stroke='#202020' stroke-width='6'/></svg>";
+        const affineSource = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">${affineBody}</svg>`;
+        await importFile(doc, "affine-clipped-strokes.svg", affineSource, "imported");
+        await until(() => (doc.querySelector("footer")?.textContent ?? "").includes("1 item"), "Affine import did not create one layer");
+        await selectTransformableLayer(doc, "64, 64");
+        changeValue(inputInLabel(doc, "X"), 64);
+        changeValue(inputInLabel(doc, "Y"), 64);
+        changeValue(inputInLabel(doc, "Skala", true), 300);
+        const affineSvg = await artifact(doc, /Export SVG/, "SVG");
+        const affinePng = await artifact(doc, /Export PNG/, "PNG");
+        const referenceSvg = new Blob([`<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><svg x="16" y="16" width="96" height="96" viewBox="0 0 256 256">${affineBody}</svg></svg>`], { type: "image/svg+xml" });
+        const reference = await rasterPixels(referenceSvg, "affine reference");
+        const compareInterior = async (blob, label) => {
+          const actual = await rasterPixels(blob, label);
+          if (actual.width !== reference.width || actual.height !== reference.height) throw new Error(`${label}: dimensions differ from original-source reference`);
+          let compared = 0;
+          for (let y = 1; y < reference.height - 1; y++) for (let x = 1; x < reference.width - 1; x++) {
+            const center = reference.pixel(x, y);
+            const neighbors = [[x - 1, y - 1], [x, y - 1], [x + 1, y - 1], [x - 1, y], [x + 1, y], [x - 1, y + 1], [x, y + 1], [x + 1, y + 1]].map(([nx, ny]) => reference.pixel(nx, ny));
+            const solid = center[3] >= 250 && neighbors.every((pixel) => pixel[3] >= 250 && pixel.slice(0, 3).every((channel, i) => Math.abs(channel - center[i]) <= 4));
+            const transparent = center[3] === 0 && neighbors.every((pixel) => pixel[3] === 0);
+            if (!solid && !transparent) continue;
+            compared++;
+            const pixel = actual.pixel(x, y);
+            if (solid ? pixel[3] < 245 || pixel.slice(0, 3).some((channel, i) => Math.abs(channel - center[i]) > 5) : pixel[3] > 8) throw new Error(`${label}: original-source interior differs at ${x},${y}`);
+          }
+          if (!compared) throw new Error(`${label}: reference had no comparable interior pixels`);
+        };
+        await compareInterior(affineSvg, "Downloaded affine SVG");
+        await compareInterior(affinePng, "Downloaded affine PNG");
+        result.textContent = "PASS: real SVG import, Fabric-derived SVG + source retention, clipping, collision-safe vector export, corner/rotation/oversize raster points, evenodd clip geometry under nonzero consumers, affine clipped stroke geometry in SVG and PNG, live preview and ghost fade, transparent PNG, white JPEG, and rejection preservation.";
+      } catch (error) {
+        result.textContent = `FAIL: ${error instanceof Error ? error.message : String(error)}`;
+        throw error;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="96" viewBox="0 0 128 96">
+  <defs>
+    <clipPath id="notch-clip"><path d="M4 4H62V60H4Z M20 20H46V44H20Z" fill-rule="evenodd" clip-rule="evenodd"/></clipPath>
+  </defs>
+  <g clip-path="url(#notch-clip)" fill="#d9a441" stroke="#202020" stroke-width="2">
+    <path d="M8 8H58V16H32V52H24V16H8Z"/>
+  </g>
+  <circle cx="90" cy="26" r="12" fill="#4b9b83"/>
+  <path d="M74 70L118 76L102 90Z" fill="#c55348"/>
+</svg>

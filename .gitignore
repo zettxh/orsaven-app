@@ -1,0 +1,14 @@
+/*
+!/.gitignore
+!/.github/
+!/pattern-studio/
+
+*.md
+*.mdx
+*.ai
+teaching-session.png
+.scratch/
+.memory/
+.env*
+*.log
+/pattern-studio/public/fonts/README.txt

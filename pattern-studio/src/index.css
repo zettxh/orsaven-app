@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/*
+ * Token gaya LearnHarness, ditulis ulang (bukan salinan file LearnHarness).
+ * LearnHarness berlisensi AGPL-3.0, jadi starter ini hanya meniru bahasa
+ * visualnya: palet, radius, ritme 4px, dan tipografi tiga lapis.
+ *
+ * Palet: background #141414, card #1C1C1C, border #434343,
+ * teks #E6E6E6, teks redup #8D8D8D, hover #2A2A2A.
+ * Font: chrome = JetBrains Mono, isi = Source Sans 3, judul = serif.
+ * Kalau kamu punya cmunbx.ttf (CMU Serif, OFL), taruh di public/fonts/
+ * dan aktifkan @font-face di bawah; kalau tidak ada, judul jatuh ke Georgia.
+ */
+@theme {
+  --color-background: #141414;
+  --color-card: #1c1c1c;
+  --color-popover: #1c1c1c;
+  --color-primary: #e6e6e6;
+  --color-primary-foreground: #141414;
+  --color-secondary: #1c1c1c;
+  --color-muted: #1c1c1c;
+  --color-muted-foreground: #8d8d8d;
+  --color-accent: #2a2a2a;
+  --color-accent-foreground: #e6e6e6;
+  --color-border: #434343;
+  --color-input: #434343;
+  --color-ring: #8d8d8d;
+  --color-foreground: #e6e6e6;
+  --color-gold: #e5b83b;
+
+  --font-ui: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-prose: "Source Sans 3 Variable", "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+  --font-title: "CMU Serif", Georgia, "Times New Roman", serif;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+}
+
+/* Aktifkan blok ini setelah cmunbx.ttf ditaruh di public/fonts/ */
+/* @font-face {
+  font-family: "CMU Serif";
+  src: url("/fonts/cmunbx.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+} */
+
+* {
+  border-color: var(--color-border);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+/* Label kecil bergaya LearnHarness: uppercase, mono, redup, tracking lebar. */
+.lh-label {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+input[type="range"] {
+  accent-color: var(--color-gold);
+}
+
+input[type="number"],
+input[type="text"],
+select {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: var(--color-foreground);
+  outline: none;
+  width: 100%;
+}
+
+input[type="number"]:focus,
+input[type="text"]:focus,
+select:focus {
+  border-color: var(--color-ring);
+}
