@@ -10,6 +10,7 @@ import type { Asset, PatternItem, PreviewMode, Project, TileSettings } from "./l
 import { DEFAULT_TILE, uid, wrap } from "./lib/types";
 import { svgDataUrl, validateSvg } from "./lib/svg";
 import { decodeProject, encodeProject, MAX_PROJECT_BYTES } from "./lib/project";
+import { useRecovery } from "./lib/useRecovery";
 
 declare global {
   interface Window {
@@ -46,6 +47,22 @@ async function fabricSvgSource(source: string, parsed: Awaited<ReturnType<typeof
   }
   return new XMLSerializer().serializeToString(document.documentElement);
 }
+
+async function hydrateProject(contents: string): Promise<Project> {
+  const portable = decodeProject(contents);
+  const safeAssets: Asset[] = [];
+  for (const asset of portable.assets) {
+    const safeSvg = validateSvg(asset.originalSvg);
+    const parsed = await loadSVGFromString(safeSvg);
+    if (!parsed.objects.some(Boolean)) throw new Error(`${asset.name}: SVG project tidak dapat dibaca.`);
+    const fabricSvg = await fabricSvgSource(safeSvg, parsed);
+    safeAssets.push({ ...asset, fabricSvg, src: svgDataUrl(fabricSvg) });
+  }
+  assertAssetPixelBudget(safeAssets);
+  assertRasterBudget(portable.tile, portable.items, safeAssets);
+  return { ...portable, assets: safeAssets };
+}
+
 export default function App() {
   const [project, setProject] = useState<Project>(() => ({
     name: "Pattern tanpa judul",
@@ -80,6 +97,36 @@ export default function App() {
   const history = useRef<{ past: Project[]; future: Project[] }>({ past: [], future: [] });
   const current = useRef(project);
   current.current = project;
+  const recovery = useRecovery(project);
+  const [origin, setOrigin] = useState<"new" | "saved" | "recovery">("new");
+  const baseline = useRef<Project | null>(project);
+  const [restoring, setRestoring] = useState(false);
+  const recoveryRegion = useRef<HTMLElement>(null);
+  const blocked = recovery.blocked || restoring;
+  const dirty = baseline.current !== project;
+
+  useEffect(() => {
+    if (recovery.blocked) recoveryRegion.current?.focus();
+  }, [recovery.blocked, recovery.contents, recovery.error]);
+
+  async function restoreRecovery() {
+    if (recovery.contents === null || recovery.busy || restoring) return;
+    const request = ++generation.current;
+    const revision = documentRevision.current;
+    setRestoring(true);
+    try {
+      const restored = await hydrateProject(recovery.contents);
+      if (request !== generation.current || revision !== documentRevision.current) return;
+      baseline.current = null;
+      setOrigin("recovery");
+      applyProject(restored);
+      recovery.restored(restored);
+    } catch (error) {
+      if (request === generation.current) recovery.restoreFailed(error);
+    } finally {
+      setRestoring(false);
+    }
+  }
   const canUndo = history.current.past.length > 0;
   const canRedo = history.current.future.length > 0;
 
@@ -94,6 +141,7 @@ export default function App() {
   }
 
   function commit(next: Project) {
+    if (blocked) return;
     const previous = current.current;
     const sameTile = Object.keys(previous.tile).every((key) => previous.tile[key as keyof TileSettings] === next.tile[key as keyof TileSettings]);
     const sameItems = previous.items.length === next.items.length && previous.items.every((item, index) => {
@@ -132,6 +180,7 @@ export default function App() {
   }
 
   function undo() {
+    if (blocked) return;
     const previous = history.current.past[history.current.past.length - 1];
     if (!previous) return;
     invalidateArtifacts();
@@ -142,6 +191,7 @@ export default function App() {
   }
 
   function redo() {
+    if (blocked) return;
     const next = history.current.future[0];
     if (!next) return;
     invalidateArtifacts();
@@ -152,8 +202,12 @@ export default function App() {
   }
 
   function newProject() {
-    if (history.current.past.length && !window.confirm("Buang perubahan project dan buat project baru?")) return;
-    applyProject({ name: "Pattern tanpa judul", tile: DEFAULT_TILE, items: [], assets: builtinAssets() });
+    if (blocked) return;
+    if (baseline.current !== current.current && !window.confirm("Buang perubahan project yang belum tersimpan dan buat project baru?")) return;
+    const next = { name: "Pattern tanpa judul", tile: DEFAULT_TILE, items: [], assets: builtinAssets() };
+    baseline.current = next;
+    setOrigin("new");
+    applyProject(next);
   }
 
   useEffect(() => () => {
@@ -164,6 +218,7 @@ export default function App() {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      if (blocked) return;
       if (event.isComposing || event.metaKey && event.key === "Process") return;
       const target = event.target;
       const editable = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target instanceof HTMLInputElement && ["text", "search", "number", "range"].includes(target.type));
@@ -363,7 +418,7 @@ export default function App() {
   }
 
   async function saveProject() {
-    if (projectIo.current) return;
+    if (blocked || projectIo.current) return;
     projectIo.current = true;
     setProjectBusy(true);
     const revision = documentRevision.current;
@@ -379,6 +434,11 @@ export default function App() {
         if (revision !== documentRevision.current) return;
         setExportMessage(path ? "Project tersimpan." : "Penyimpanan dibatalkan.");
         setExportError(false);
+        if (path) {
+          baseline.current = snapshot;
+          setOrigin("saved");
+          await recovery.savedProject(snapshot);
+        }
       } else {
         beginArtifact("project");
         publishArtifact("project", "orsaven", new Blob([contents], { type: "application/json" }), revision);
@@ -394,8 +454,8 @@ export default function App() {
   }
 
   async function readProject(read: () => Promise<string | null>) {
-    if (projectIo.current) return;
-    if (history.current.past.length && !window.confirm("Buang perubahan project dan buka file ini?")) return;
+    if (blocked || projectIo.current) return;
+    if (baseline.current !== current.current && !window.confirm("Buang perubahan project yang belum tersimpan dan buka file ini?")) return;
     projectIo.current = true;
     setProjectBusy(true);
     const request = ++generation.current;
@@ -410,22 +470,15 @@ export default function App() {
         setImportMessage("Pembukaan dibatalkan.");
         return;
       }
-      const portable = decodeProject(contents);
-      const safeAssets: Asset[] = [];
-      for (const asset of portable.assets) {
-        const safeSvg = validateSvg(asset.originalSvg);
-        const parsed = await loadSVGFromString(safeSvg);
-        if (!parsed.objects.some(Boolean)) throw new Error(`${asset.name}: SVG project tidak dapat dibaca.`);
-        const fabricSvg = await fabricSvgSource(safeSvg, parsed);
-        safeAssets.push({ ...asset, fabricSvg, src: svgDataUrl(fabricSvg) });
-      }
-      assertAssetPixelBudget(safeAssets);
-      assertRasterBudget(portable.tile, portable.items, safeAssets);
+      const portable = await hydrateProject(contents);
       if (request !== generation.current) return;
       if (revision !== documentRevision.current) throw new Error("Dokumen berubah saat project dibaca. Buka ulang file agar edit terbaru tidak hilang.");
-      applyProject({ ...portable, assets: safeAssets });
+      baseline.current = portable;
+      setOrigin("saved");
+      applyProject(portable);
       setImportMessage("Project terbuka.");
       setImportError(false);
+      await recovery.openedProject(portable);
     } catch (error) {
       if (request !== generation.current) return;
       setImportMessage(error instanceof Error ? error.message : String(error));
@@ -455,7 +508,23 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
-      <header className="flex flex-wrap items-center gap-3 border-b border-border bg-background px-4 py-3">
+      <section ref={recoveryRegion} tabIndex={-1} aria-label="Recovery project" aria-busy={recovery.busy || restoring} className="min-w-0 shrink-0 border-b border-border px-4 py-2 text-[12px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring">
+        <p>Sumber dokumen: {origin === "recovery" ? "recovery" : origin === "saved" ? "file project tersimpan" : "dokumen baru"}. {dirty ? "Perubahan belum tersimpan ke file project." : ""}</p>
+        <p role={recovery.error ? "alert" : "status"} className="break-words">
+          {restoring ? "Memvalidasi dan memulihkan recovery..." : recovery.status} {recovery.error}
+        </p>
+        {recovery.blocked && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {recovery.contents !== null && <button disabled={recovery.busy || restoring} onClick={() => void restoreRecovery()} className="rounded-lg bg-primary px-3 py-2 font-bold text-primary-foreground disabled:opacity-50">Pulihkan pekerjaan</button>}
+            {recovery.error && <button disabled={recovery.busy || restoring} onClick={() => void recovery.discover()} className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50">Coba baca recovery lagi</button>}
+            <button disabled={recovery.busy || restoring} onClick={() => {
+              if (window.confirm("Hapus salinan recovery ini? Pekerjaan yang hanya ada di recovery akan hilang. File project utama tidak berubah.")) void recovery.discard();
+            }} className="rounded-lg border border-border bg-card px-3 py-2 disabled:opacity-50">Buang recovery</button>
+          </div>
+        )}
+        {!recovery.blocked && recovery.error && <button onClick={recovery.retry} className="mt-2 rounded-lg border border-border bg-card px-3 py-2">Coba recovery lagi</button>}
+      </section>
+      <header inert={blocked} className="flex flex-wrap items-center gap-3 border-b border-border bg-background px-4 py-3">
         <h1 className="font-title text-[28px] font-bold leading-none">Pattern Studio</h1>
         <input
           type="text"
@@ -579,7 +648,7 @@ export default function App() {
           ) : null}
         </div>
       </header>
-      <div className="editor-workspace flex min-h-0 flex-1 flex-col md:flex-row">
+      <div inert={blocked} className="editor-workspace flex min-h-0 flex-1 flex-col md:flex-row">
         <aside className="editor-library max-h-[30vh] w-full shrink-0 overflow-y-auto border-b border-border bg-background md:max-h-none md:w-[260px] md:border-b-0 md:border-r">
           <Sidebar
             assets={assets}

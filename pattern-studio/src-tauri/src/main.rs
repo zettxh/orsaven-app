@@ -1,4 +1,7 @@
 mod project_io;
+mod recovery;
+
+use tauri::Manager;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,10 +74,56 @@ async fn open_project(app: tauri::AppHandle) -> Result<Option<OpenedProject>, St
         contents,
     }))
 }
+
+#[tauri::command]
+async fn read_recovery(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Lokasi penyimpanan recovery tidak tersedia: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        recovery::RecoveryStore::new(directory).load()
+    })
+    .await
+    .map_err(|error| format!("Pembacaan recovery gagal: {error}"))?
+}
+
+#[tauri::command]
+async fn write_recovery(app: tauri::AppHandle, contents: String) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Lokasi penyimpanan recovery tidak tersedia: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        recovery::RecoveryStore::new(directory).save(&contents)
+    })
+    .await
+    .map_err(|error| format!("Penyimpanan recovery gagal: {error}"))?
+}
+
+#[tauri::command]
+async fn discard_recovery(app: tauri::AppHandle) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Lokasi penyimpanan recovery tidak tersedia: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        recovery::RecoveryStore::new(directory).discard()
+    })
+    .await
+    .map_err(|error| format!("Penghapusan recovery gagal: {error}"))?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![save_project, open_project])
+        .invoke_handler(tauri::generate_handler![
+            save_project,
+            open_project,
+            read_recovery,
+            write_recovery,
+            discard_recovery
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
